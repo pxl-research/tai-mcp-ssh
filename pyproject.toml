@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tai-mcp-ssh"
+version = "0.1.0"
+description = "Opinionated MCP server for safely letting an LLM admin a small fleet of Linux servers over SSH."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+    { name = "PXL Smart ICT" },
+]
+keywords = ["mcp", "ssh", "llm", "tmux", "remote-admin"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "mcp>=1.0",
+    "asyncssh>=2.14",
+    "keyring>=24",
+    "click>=8.1",
+    "tomli-w>=1.0",
+    "python-ulid>=2.0",
+]
+
+[project.scripts]
+tai-mcp-ssh = "tai_mcp_ssh.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pre-commit>=4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tai_mcp_ssh"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
