@@ -66,8 +66,7 @@ known_hosts
 # user redirects state into the project tree)
 logs/
 downloads/
-audit.jsonl
-audit.jsonl.*
+audit/
 
 # OpenSpec — keep changes and specs tracked, but ignore any local
 # experimental output the tooling may drop alongside them

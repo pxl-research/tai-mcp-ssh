@@ -68,21 +68,40 @@ Every command is wrapped to tee its combined stdout+stderr to `~/.tai-ssh/logs/<
 
 **Cleanup**: a stale-log sweep deletes logs older than 7 days from `~/.tai-ssh/logs/` on every connect, capped to avoid pathological cases. Default retention is configurable per host in `hosts.toml`.
 
-### 5. JSONL audit log with rich fields
+### 5. JSONL audit log, folder per host, file per UTC day
 
-Path: `~/.local/state/tai-mcp-ssh/audit.jsonl` (XDG state dir; macOS may use `~/Library/Logs/tai-mcp-ssh/audit.jsonl` — picked at install time, documented).
+Root: `~/.local/state/tai-mcp-ssh/audit/` (XDG state dir; macOS uses `~/Library/Logs/tai-mcp-ssh/audit/` — picked by `paths.py`).
+
+Layout:
+
+```
+audit/
+├── pi-living/
+│   ├── 2026-05-12.jsonl
+│   └── 2026-05-13.jsonl
+├── ubuntu-vps/
+│   └── 2026-05-13.jsonl
+└── _system/                     ← MCP startup, config errors, retention
+    └── 2026-05-12.jsonl            sweep summaries, pre-allowlist rejections
+```
 
 One JSON object per line. Fields:
 
 ```
-ts, tool, session, host, user, cmd, reason, exit, status,
-duration_ms, stdout_bytes, stderr_bytes, log_id, truncated,
-needs_password, llm_session_id?, sha256? (for put/get)
+ts, tool, host (always; "_system" for non-host events), session, user, cmd,
+reason, exit, status, duration_ms, stdout_bytes, stderr_bytes, log_id,
+truncated, needs_password, llm_session_id?, sha256? (for put/get)
 ```
 
 **Why JSONL not plain log**: greppable, `jq`-able, append-only, line-oriented for tailing. A future web UI is a thin skin over the file.
 
-**Rotation**: append-only with size-based rotation at 64 MB (`audit.jsonl` → `audit.jsonl.1`, etc.). Not implemented in v1; the file is allowed to grow and the user can rotate manually. Tracked as follow-up.
+**Why folder per host**: the natural audit unit is "what was done to host X." Removing a host is `rm -rf audit/<host>/`; archival is `gzip audit/<host>/2025-*.jsonl`; querying one host is direct without filtering. Multi-host narratives (one LLM task touching two hosts) are reconstructed at query time by merging the relevant daily files by `ts` — `tai-mcp-ssh audit tail` does this for the user.
+
+**Why file per UTC day**: natural size bound (typical day per host: tens of KB at ~300–500 B/record), trivial archival semantics, sortable filenames, no rotation logic to maintain. UTC chosen so the rollover is deterministic and audit lines from different timezones don't confuse the day boundary.
+
+**Retention**: 90 days default, configurable via `[audit].retention_days` in `hosts.toml`. Sweep runs on MCP startup, deletes files in `audit/*/` whose filename date is older than the cutoff, logs the count of deleted files to `_system`. Best-effort: failure audits and is non-fatal.
+
+**Size cap**: intentionally absent in v1. The day-boundary already bounds files in practice. If a pathological loop produces a multi-MB daily file the user will notice via `du`; we can add a per-file overflow (`YYYY-MM-DD.1.jsonl`, ...) later if it becomes a real problem.
 
 ### 6. Composite session IDs `<host>/<name>`
 
@@ -159,7 +178,7 @@ get(host, remote_path, local_path?, reason?) → {bytes, sha256, local_path}
 - **[Long-running commands look like "stuck on prompt"]** → pattern set is conservative (anchored to known regexes, end-of-pane only) and timeout fallback still returns `still_running` rather than mis-classifying.
 - **[Keychain unavailable in headless contexts]** (e.g. user runs MCP under launchd before login on macOS, or in a server without secret service) → CLI `hosts test` detects this at setup time; documented as a known limitation. SSH key auth is the recommended escape hatch.
 - **[On-remote `~/.tai-ssh/logs/` grows unbounded]** → 7-day TTL sweep on connect, configurable per host. Manual `rm` always available.
-- **[Audit log grows unbounded]** → no automatic rotation in v1, documented as a follow-up. JSONL is friendly to manual rotation.
+- **[Audit log grows over time]** → bounded primarily by daily file rotation (small per-day files), capped overall by a 90-day retention sweep on startup. Configurable; manual rotation is also trivial because files are date-named.
 - **[Concurrent `session_run` calls against the same session]** → MCP serializes per-session: a second `session_run` to a busy session returns `{status: "busy"}` with a hint to use `session_wait`. Audit log records both attempts.
 - **[tmux not installed on the remote]** → first connect attempts to detect tmux and emits a clear error with the install command. The MCP does not auto-install.
 

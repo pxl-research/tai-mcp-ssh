@@ -21,10 +21,15 @@
 ## 3. Audit log
 
 - [ ] 3.1 Implement `audit.py`: append-only JSONL writer with line-atomic writes (single `write` of the serialized line + `\n`)
-- [ ] 3.2 Provide `record(tool, **fields)` helper that auto-fills `ts` (ISO-8601 UTC) and merges caller fields
-- [ ] 3.3 Ensure parent directory creation with mode `0700` on first write
-- [ ] 3.4 Add a redaction helper that scrubs known-secret fields before write (`password`, `password_ref` values resolved to the secret)
-- [ ] 3.5 Unit tests: concurrent writes do not interleave, parent dir creation, secret redaction
+- [ ] 3.2 Provide `record(tool, host, **fields)` helper that auto-fills `ts` (ISO-8601 UTC), resolves the target file as `audit/<host>/<UTC-date>.jsonl` (defaulting `host = "_system"` for non-host events), and merges caller fields
+- [ ] 3.3 Lazily create per-host folders (`audit/<host>/`) with mode `0700` on first write to that host
+- [ ] 3.4 Detect UTC date rollover on every write so a long-running process correctly switches to the next day's file without restart
+- [ ] 3.5 Maintain a per-host open-file-handle cache keyed by `(host, date)` so we don't reopen on every record; close stale handles after rollover
+- [ ] 3.6 Per-host `asyncio.Lock` for serialized writes within a host; writes to different hosts run in parallel without contention
+- [ ] 3.7 Implement startup retention sweep: delete files in `audit/*/` whose filename-date is older than `retention_days` (default 90); record the sweep summary as a `_system` event; failures audited and non-fatal
+- [ ] 3.8 Read `[audit].retention_days` (optional) from `hosts.toml` via `config.py`
+- [ ] 3.9 Add a redaction helper that scrubs known-secret fields before write (`password`, `password_ref` resolved to the secret, etc.)
+- [ ] 3.10 Unit tests: same-host writes serialize, cross-host writes parallelize, UTC midnight rollover switches files, retention sweep deletes only old files, host folder lazy creation, secret redaction, `_system` fallback for missing host
 
 ## 4. SSH connection layer
 
