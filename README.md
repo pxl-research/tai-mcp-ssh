@@ -45,6 +45,28 @@ uv run ruff check .
 uv run mypy src
 ```
 
+### Pre-commit hooks
+
+Activate once per clone:
+
+```sh
+uv run pre-commit install
+```
+
+From then on every `git commit` runs:
+
+- `ruff` (lint with `--fix`) and `ruff-format`
+- `mypy` (via `uv run mypy src` — sees the same deps as your venv)
+- hygiene: trailing whitespace, EOF newline, TOML/YAML syntax, merge-conflict markers, large files (>500 KB), private SSH key detection, line-ending normalisation
+
+Run them manually against the whole tree (useful before opening a PR):
+
+```sh
+uv run pre-commit run --all-files
+```
+
+Hook versions are pinned in `.pre-commit-config.yaml`. Bump them with `uv run pre-commit autoupdate` when you want.
+
 > **Note**: this project is currently an MVP for internal / educational use at PXL Smart ICT and is not published to PyPI. The intended install path is `git clone` + `uv sync`.
 
 ## Add a host

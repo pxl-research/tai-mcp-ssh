@@ -1,12 +1,14 @@
 ## 1. Project scaffolding
 
 - [ ] 1.1 Create `pyproject.toml` (PEP 621, Python 3.11+, project name `tai-mcp-ssh`, author "PXL Smart ICT", `license = { file = "LICENSE" }`, build backend `hatchling`) with runtime deps: `mcp`, `asyncssh`, `keyring`, `click`, `tomli-w`, `python-ulid`
-- [ ] 1.2 Add dev deps under `[dependency-groups].dev`: `pytest`, `pytest-asyncio`, `ruff`, `mypy`
+- [ ] 1.2 Add dev deps under `[dependency-groups].dev`: `pytest`, `pytest-asyncio`, `ruff`, `mypy`, `pre-commit`
 - [ ] 1.3 Add console entry point `tai-mcp-ssh = tai_mcp_ssh.cli:main` in `pyproject.toml`
 - [ ] 1.4 Create package layout `src/tai_mcp_ssh/{__init__.py, cli.py, server.py, config.py, audit.py, sessions.py, transfer.py, ssh.py, paths.py}` with stub implementations sufficient for `uv run tai-mcp-ssh --help` to succeed
 - [ ] 1.5 Run `uv sync` to create `.venv` and generate `uv.lock`; commit `uv.lock` (treats deps as reproducible for teammates)
 - [ ] 1.6 Verify `README.md` and `LICENSE` are in place (already created during the design phase); confirm `.gitignore` covers `.venv/` and `uv` caches
-- [ ] 1.7 CI placeholder: GitHub Actions workflow that runs `uv sync --frozen`, `uv run ruff check .`, `uv run mypy src`, `uv run pytest`
+- [ ] 1.7 Add `[tool.ruff]` and `[tool.mypy]` sections to `pyproject.toml` (target Python 3.11, ruff `line-length = 100`, enable common rule sets `E`, `F`, `I`, `UP`, `B`, `SIM`; mypy `strict = true` on `src/`)
+- [ ] 1.8 Activate pre-commit hooks locally: `uv run pre-commit install`; smoke-test with `uv run pre-commit run --all-files`
+- [ ] 1.9 CI placeholder: GitHub Actions workflow that runs `uv sync --frozen` and then `uv run pre-commit run --all-files` (which exercises ruff, ruff-format, mypy, and hygiene hooks in one step) plus `uv run pytest`
 
 ## 2. Configuration and paths
 
