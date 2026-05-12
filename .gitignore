@@ -72,3 +72,6 @@ audit.jsonl.*
 # OpenSpec — keep changes and specs tracked, but ignore any local
 # experimental output the tooling may drop alongside them
 openspec/.cache/
+
+# claude
+.claude/
