@@ -1,0 +1,74 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution and build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Packaging / installer state
+*.manifest
+*.spec
+
+# Test, coverage, type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project-local secrets and runtime state
+.env
+.env.*
+!.env.example
+*.local
+
+# Local test fixtures that might contain real host info or keys
+**/fixtures/local/
+**/*.private.toml
+
+# Anything resembling SSH keys committed by mistake
+id_rsa
+id_ed25519
+id_ecdsa
+*.pem
+*.key
+*.ppk
+known_hosts
+
+# Local logs and downloaded artifacts (the MCP also writes to
+# ~/.local/state/... which is outside the repo, but be safe if the
+# user redirects state into the project tree)
+logs/
+downloads/
+audit.jsonl
+audit.jsonl.*
+
+# OpenSpec — keep changes and specs tracked, but ignore any local
+# experimental output the tooling may drop alongside them
+openspec/.cache/
