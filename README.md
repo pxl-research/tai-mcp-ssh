@@ -22,23 +22,35 @@ A small, opinionated [MCP](https://modelcontextprotocol.io) server that lets an 
 ## Requirements
 
 - Python 3.11+ on the machine running the MCP
+- [`uv`](https://docs.astral.sh/uv/) (`brew install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`)
 - `tmux` installed on each managed remote host
 - SSH access to those hosts (key auth strongly preferred)
 
-## Install
+## Development setup
+
+Clone the repo, then:
 
 ```sh
-pip install tai-mcp-ssh   # once published
-# or, from source:
-pip install .
+uv sync
 ```
 
-This installs a single binary `tai-mcp-ssh`.
+This creates `.venv/` and installs all runtime + dev dependencies from `uv.lock`. No global pollution.
+
+Common dev commands:
+
+```sh
+uv run tai-mcp-ssh --help
+uv run pytest
+uv run ruff check .
+uv run mypy src
+```
+
+> **Note**: this project is currently an MVP for internal / educational use at PXL Smart ICT and is not published to PyPI. The intended install path is `git clone` + `uv sync`.
 
 ## Add a host
 
 ```sh
-tai-mcp-ssh hosts add pi-living
+uv run tai-mcp-ssh hosts add pi-living
 # interactive prompts for host, user, auth method, etc.
 # passwords (if needed) are captured via getpass and stored in the OS keychain
 ```
@@ -46,19 +58,31 @@ tai-mcp-ssh hosts add pi-living
 Then verify:
 
 ```sh
-tai-mcp-ssh hosts test pi-living
+uv run tai-mcp-ssh hosts test pi-living
 # checks: connect, whoami, tmux present, log dir writable, end-to-end latency
 ```
 
 Host config lives at `~/.config/tai-mcp-ssh/hosts.toml`. Key-auth hosts can piggyback on your existing `~/.ssh/config` — just list the alias.
 
-## Run the MCP server
+## Wire into your MCP client
 
-```sh
-tai-mcp-ssh serve
+The server speaks MCP over stdio. Configure your MCP client to launch it via `uv` so deps resolve from this checkout:
+
+```json
+{
+  "mcpServers": {
+    "tai-mcp-ssh": {
+      "command": "uv",
+      "args": [
+        "--directory", "/absolute/path/to/tai-mcp-ssh",
+        "run", "tai-mcp-ssh", "serve"
+      ]
+    }
+  }
+}
 ```
 
-This speaks MCP over stdio. Wire it into your MCP client of choice (e.g. Claude Desktop, Claude Code) the same way you'd wire any other stdio MCP server.
+`uv --directory` tells uv to operate as if it were in that directory regardless of where the MCP client launches it from. Edits to the source are picked up on the next launch — no rebuild step.
 
 ## The sudo handoff
 

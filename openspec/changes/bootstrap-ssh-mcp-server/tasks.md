@@ -1,11 +1,12 @@
 ## 1. Project scaffolding
 
-- [ ] 1.1 Create `pyproject.toml` (Python 3.11+, project name `tai-mcp-ssh`, license, author) with runtime deps: `mcp`, `asyncssh`, `keyring`, `click`, `tomli-w`, `python-ulid`
-- [ ] 1.2 Add dev deps: `pytest`, `pytest-asyncio`, `ruff`, `mypy`
-- [ ] 1.3 Create package layout `src/tai_mcp_ssh/{__init__.py, cli.py, server.py, config.py, audit.py, sessions.py, transfer.py, ssh.py, paths.py}`
-- [ ] 1.4 Add console entry point `tai-mcp-ssh = tai_mcp_ssh.cli:main` in `pyproject.toml`
-- [ ] 1.5 Create initial `README.md` describing install, host setup, and the sudo-handoff flow
-- [ ] 1.6 Add `.gitignore` and CI placeholder (`ruff` + `mypy` + `pytest` on push)
+- [ ] 1.1 Create `pyproject.toml` (PEP 621, Python 3.11+, project name `tai-mcp-ssh`, author "PXL Smart ICT", `license = { file = "LICENSE" }`, build backend `hatchling`) with runtime deps: `mcp`, `asyncssh`, `keyring`, `click`, `tomli-w`, `python-ulid`
+- [ ] 1.2 Add dev deps under `[dependency-groups].dev`: `pytest`, `pytest-asyncio`, `ruff`, `mypy`
+- [ ] 1.3 Add console entry point `tai-mcp-ssh = tai_mcp_ssh.cli:main` in `pyproject.toml`
+- [ ] 1.4 Create package layout `src/tai_mcp_ssh/{__init__.py, cli.py, server.py, config.py, audit.py, sessions.py, transfer.py, ssh.py, paths.py}` with stub implementations sufficient for `uv run tai-mcp-ssh --help` to succeed
+- [ ] 1.5 Run `uv sync` to create `.venv` and generate `uv.lock`; commit `uv.lock` (treats deps as reproducible for teammates)
+- [ ] 1.6 Verify `README.md` and `LICENSE` are in place (already created during the design phase); confirm `.gitignore` covers `.venv/` and `uv` caches
+- [ ] 1.7 CI placeholder: GitHub Actions workflow that runs `uv sync --frozen`, `uv run ruff check .`, `uv run mypy src`, `uv run pytest`
 
 ## 2. Configuration and paths
 
