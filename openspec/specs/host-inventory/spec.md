@@ -1,7 +1,7 @@
 # host-inventory Specification
 
 ## Purpose
-TBD - created by promoting change `bootstrap-ssh-mcp-server`. Update Purpose after archive.
+Define which hosts the LLM is allowed to reach and how to authenticate to each. A single TOML file (`~/.config/tai-mcp-ssh/hosts.toml`) names each reachable host by alias, mirrors what `~/.ssh/config` already knows where possible, and bars plaintext secrets — passwords must live in the OS keychain referenced by `keychain://tai-mcp-ssh/<alias>` URIs. The allowlist is the system's only gate on which machines the LLM can touch; every other capability (sessions, transfer) defers to it.
 ## Requirements
 ### Requirement: Allowlist file location and format
 The system SHALL read the set of LLM-reachable hosts from a TOML file at `~/.config/tai-mcp-ssh/hosts.toml`. Only hosts present in this file SHALL be addressable by MCP tools.

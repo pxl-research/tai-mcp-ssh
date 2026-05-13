@@ -1,7 +1,7 @@
 # remote-sessions Specification
 
 ## Purpose
-TBD - created by promoting change `bootstrap-ssh-mcp-server`. Update Purpose after archive.
+Give the LLM long-lived shell sessions on managed hosts that survive across multiple tool calls. Each session is a named tmux session on the remote (`tai-mcp/<name>`), identified by a composite `<host>/<name>` ID and addressed via `session_run`, `session_wait`, `session_list`, and `session_kill`. tmux preserves cwd, environment, exported variables, function definitions, and any backgrounded children between calls — the foundation the LLM needs to drive a real interactive workflow. Completion is detected via per-command sentinels; known interactive prompts (sudo, hostkey, apt confirmations) are recognised at the pane tail so the LLM can hand off cleanly when human input is required; transport failures (peer reboot, network drop) are surfaced as a typed `host-unreachable` error and the next call transparently reconnects.
 ## Requirements
 ### Requirement: Composite session identifier
 Sessions SHALL be identified by a composite ID of the form `<host>/<name>`, where `<host>` matches an allowlist alias and `<name>` is a session label chosen by the LLM (default `"default"`). The host SHALL be derivable from the session ID without any additional lookup.

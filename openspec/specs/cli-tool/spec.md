@@ -1,7 +1,7 @@
 # cli-tool Specification
 
 ## Purpose
-TBD - created by promoting change `bootstrap-ssh-mcp-server`. Update Purpose after archive.
+Provide the operator-facing surface for installing, configuring, and running the MCP server. A single `tai-mcp-ssh` binary exposes the subcommands needed for initial setup (`hosts add` / `hosts test`), day-to-day maintenance (`hosts list` / `hosts remove`), forensic review (`audit tail`), and starting the server itself (`serve`). The CLI is the only path that touches secrets directly — interactive prompts capture passwords and write them to the OS keychain so the rest of the system never sees plaintext.
 ## Requirements
 ### Requirement: Single binary `tai-mcp-ssh` with subcommands
 The project SHALL install a single console entry point `tai-mcp-ssh` exposing the subcommands: `hosts add`, `hosts list`, `hosts remove`, `hosts test`, `audit tail`, and `serve`.

@@ -1,7 +1,7 @@
 # audit-log Specification
 
 ## Purpose
-TBD - created by promoting change `bootstrap-ssh-mcp-server`. Update Purpose after archive.
+Provide a durable, per-host, per-day JSONL record of every MCP tool invocation — including rejections and errors — so operators can later answer "what did the LLM do, on which host, with what outcome?" without re-running anything. The log is the system's forensic primitive: every call writes exactly one record, secrets never appear in any field, and the on-disk layout is greppable with standard tools.
 ## Requirements
 ### Requirement: Audit log directory layout
 The system SHALL store audit records under a per-host directory structure rooted at the state directory. On Linux the root SHALL be `$XDG_STATE_HOME/tai-mcp-ssh/audit/` when `XDG_STATE_HOME` is set, otherwise `~/.local/state/tai-mcp-ssh/audit/`. On macOS the root SHALL be `~/Library/Logs/tai-mcp-ssh/audit/`. Each managed host SHALL have its own subdirectory named after the allowlist alias (for example `audit/pi-living/`). Non-host events SHALL be written to a reserved `audit/_system/` subdirectory.

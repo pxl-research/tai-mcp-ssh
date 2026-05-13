@@ -1,7 +1,7 @@
 # file-transfer Specification
 
 ## Purpose
-TBD - created by promoting change `bootstrap-ssh-mcp-server`. Update Purpose after archive.
+Let the LLM move files between the operator's machine and managed hosts via SFTP-backed `put` / `get` tools that ride the existing SSH connection — no separate authentication, no separate allowlist. Privilege escalation is deliberately *not* part of the transfer path: a `put` to a root-owned destination fails cleanly with guidance to use the documented stage-and-move pattern (`put` to `/tmp`, then `session_run` with `sudo mv`), so any privileged write still goes through the audited session surface.
 ## Requirements
 ### Requirement: `put` and `get` use SFTP over the existing SSH connection
 The MCP SHALL expose `put(host, local_path, remote_path, reason?)` and `get(host, remote_path, local_path?, reason?)` tools that transfer files via SFTP over the same SSH connection used for sessions. No separate authentication SHALL be required.
