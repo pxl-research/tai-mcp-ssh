@@ -79,6 +79,8 @@ def _default_handler(command: str) -> FakeProcess:
     """Handler that satisfies _ensure_ready for a healthy remote."""
     if command == "command -v tmux":
         return FakeProcess(0, "/usr/bin/tmux\n", "")
+    if command == "echo $HOME":
+        return FakeProcess(0, "/home/pi\n", "")
     if command.startswith("mkdir -p -m 0700"):
         return FakeProcess(0, "", "")
     if "find " in command and "-delete -print" in command:
@@ -277,8 +279,10 @@ async def test_ensure_ready_runs_tmux_check_and_mkdir(tmp_path: Path) -> None:
     conn = await pool.get("pi")
     fake = factory.connections[0]
     assert "command -v tmux" in fake.run_calls
+    assert "echo $HOME" in fake.run_calls
     assert any(c.startswith("mkdir -p -m 0700") for c in fake.run_calls)
     assert conn.tmux_path == "/usr/bin/tmux"
+    assert conn.home_dir == "/home/pi"
     await _flush_background_tasks()
     records = _audit_records(tmp_path, "pi")
     tools = {r["tool"] for r in records}
@@ -313,6 +317,8 @@ async def test_remote_sweep_records_deleted_count(tmp_path: Path) -> None:
     def handler(command: str) -> FakeProcess:
         if command == "command -v tmux":
             return FakeProcess(0, "/usr/bin/tmux\n", "")
+        if command == "echo $HOME":
+            return FakeProcess(0, "/home/pi\n", "")
         if command.startswith("mkdir"):
             return FakeProcess(0, "", "")
         if "find " in command:
@@ -342,6 +348,8 @@ async def test_remote_sweep_uses_custom_retention(tmp_path: Path) -> None:
     def handler(command: str) -> FakeProcess:
         if command == "command -v tmux":
             return FakeProcess(0, "/usr/bin/tmux\n", "")
+        if command == "echo $HOME":
+            return FakeProcess(0, "/home/pi\n", "")
         if command.startswith("mkdir"):
             return FakeProcess()
         if "find " in command:

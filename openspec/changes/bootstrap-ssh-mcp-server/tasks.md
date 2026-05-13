@@ -43,28 +43,28 @@
 
 ## 5. Remote sessions (tmux)
 
-- [ ] 5.1 Implement `sessions.py`: per-host registry of active sessions keyed by `<host>/<name>`
-- [ ] 5.2 Auto-create tmux session on first `session_run` (`tmux new-session -d -s tai-mcp/<name>`)
-- [ ] 5.3 Send commands via `tmux send-keys -t tai-mcp/<name> '<cmd>; echo __TAI_DONE__$?__<run_id>__' Enter`
-- [ ] 5.4 Use `tmux pipe-pane -O 'cat >> ~/.tai-ssh/logs/<log_id>.log'` per command so output is captured to file regardless of pane capture timing
-- [ ] 5.5 Poll for completion: tail the log file (small `tail`s over SFTP or SSH exec) every ~200ms looking for sentinel
-- [ ] 5.6 Implement interactive-prompt detection: regex set for sudo / `Password:` / `(yes/no)?` / apt-Y/n / `Are you sure?` matched at tail
-- [ ] 5.7 Implement timeout fallback returning `still_running`
-- [ ] 5.8 Implement per-session serialization: reject second `session_run` while session is non-idle, returning `status: "busy"`
-- [ ] 5.9 Implement `session_wait`: resume polling without sending a new command; same status outcomes
-- [ ] 5.10 Implement `session_kill`: `tmux kill-session -t tai-mcp/<name>`; clear registry entry
-- [ ] 5.11 Implement `session_list`: enumerate registry across all hosts with metadata
-- [ ] 5.12 Build the response shape (head/tail/bytes/truncated/log_id/log_path/attach_hint/prompt) per spec
-- [ ] 5.13 Unit tests with a fake remote: sentinel detection, prompt detection, busy rejection, kill, list
+- [x] 5.1 Implement `sessions.py`: per-host registry of active sessions keyed by `<host>/<name>`
+- [x] 5.2 Auto-create tmux session on first `session_run` (`tmux new-session -d -s tai-mcp/<name>`)
+- [x] 5.3 Send commands via `tmux send-keys -t tai-mcp/<name> '<cmd>; echo __TAI_DONE__$?__<run_id>__' Enter`
+- [x] 5.4 Use `tmux pipe-pane -O 'cat >> ~/.tai-ssh/logs/<log_id>.log'` per command so output is captured to file regardless of pane capture timing
+- [x] 5.5 Poll for completion: tail the log file (small `tail`s over SFTP or SSH exec) every ~200ms looking for sentinel
+- [x] 5.6 Implement interactive-prompt detection: regex set for sudo / `Password:` / `(yes/no)?` / apt-Y/n / `Are you sure?` matched at tail
+- [x] 5.7 Implement timeout fallback returning `still_running`
+- [x] 5.8 Implement per-session serialization: reject second `session_run` while session is non-idle, returning `status: "busy"`
+- [x] 5.9 Implement `session_wait`: resume polling without sending a new command; same status outcomes
+- [x] 5.10 Implement `session_kill`: `tmux kill-session -t tai-mcp/<name>`; clear registry entry
+- [x] 5.11 Implement `session_list`: enumerate registry across all hosts with metadata
+- [x] 5.12 Build the response shape (head/tail/bytes/truncated/log_id/log_path/attach_hint/prompt) per spec
+- [x] 5.13 Unit tests with a fake remote: sentinel detection, prompt detection, busy rejection, kill, list
 
 ## 6. File transfer
 
-- [ ] 6.1 Implement `transfer.py`: `put` and `get` over `asyncssh` SFTP using the existing pooled connection
-- [ ] 6.2 Compute SHA-256 streamed during transfer; record `bytes` and `sha256`
-- [ ] 6.3 Allowlist check shared with sessions (refuse unlisted host)
-- [ ] 6.4 Default `local_path` for `get` derives `~/.local/state/tai-mcp-ssh/downloads/<host>/<basename>`
-- [ ] 6.5 Surface SFTP permission errors with a guidance message pointing to the stage-and-move pattern
-- [ ] 6.6 Unit tests: put/get round-trip, sha256 correctness, permission-denied surface, default local path
+- [x] 6.1 Implement `transfer.py`: `put` and `get` over `asyncssh` SFTP using the existing pooled connection
+- [x] 6.2 Compute SHA-256 streamed during transfer; record `bytes` and `sha256`
+- [x] 6.3 Allowlist check shared with sessions (refuse unlisted host)
+- [x] 6.4 Default `local_path` for `get` derives `~/.local/state/tai-mcp-ssh/downloads/<host>/<basename>`
+- [x] 6.5 Surface SFTP permission errors with a guidance message pointing to the stage-and-move pattern
+- [x] 6.6 Unit tests: put/get round-trip, sha256 correctness, permission-denied surface, default local path
 
 ## 7. MCP server wiring
 

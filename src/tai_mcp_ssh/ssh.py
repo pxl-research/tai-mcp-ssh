@@ -65,6 +65,7 @@ class Connection:
         self._conn = ssh_conn
         self._audit = audit
         self._tmux_path: str | None = None
+        self._home_dir: str | None = None
 
     @property
     def alias(self) -> str:
@@ -77,6 +78,13 @@ class Connection:
     @property
     def tmux_path(self) -> str | None:
         return self._tmux_path
+
+    @property
+    def home_dir(self) -> str:
+        """Absolute path of the remote user's home dir. Set during _ensure_ready."""
+        if self._home_dir is None:
+            raise RuntimeError(f"{self.alias}: home_dir not resolved (Connection not ready)")
+        return self._home_dir
 
     async def run(self, command: str, *, check: bool = False) -> asyncssh.SSHCompletedProcess:
         """Execute a one-shot command. Use sessions.py for stateful operations."""
@@ -213,11 +221,18 @@ class ConnectionPool:
         conn._tmux_path = stdout
         await self._audit.record("_tmux_check", host=conn.alias, status="ok", tmux_path=stdout)
 
-        # 2. Remote log dir.
+        # 2. Resolve $HOME so callers can build absolute log paths per spec.
+        home_result = await conn.run("echo $HOME", check=True)
+        home = _as_str(home_result.stdout).strip()
+        if not home:
+            raise RuntimeError(f"{conn.alias}: could not resolve $HOME on the remote")
+        conn._home_dir = home
+
+        # 3. Remote log dir.
         await conn.run(f"mkdir -p -m 0700 {_REMOTE_LOG_DIR}", check=True)
         await self._audit.record("_logdir_check", host=conn.alias, status="ok")
 
-        # 3. Best-effort remote-log retention sweep, fire-and-forget.
+        # 4. Best-effort remote-log retention sweep, fire-and-forget.
         asyncio.create_task(self._sweep_remote_logs(conn, conn.host.log_retention_days))
 
     async def _sweep_remote_logs(self, conn: Connection, retention_days: int) -> None:
