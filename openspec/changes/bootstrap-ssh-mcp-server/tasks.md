@@ -1,35 +1,35 @@
 ## 1. Project scaffolding
 
-- [ ] 1.1 Create `pyproject.toml` (PEP 621, Python 3.11+, project name `tai-mcp-ssh`, author "PXL Smart ICT", `license = { file = "LICENSE" }`, build backend `hatchling`) with runtime deps: `mcp`, `asyncssh`, `keyring`, `click`, `tomli-w`, `python-ulid`
-- [ ] 1.2 Add dev deps under `[dependency-groups].dev`: `pytest`, `pytest-asyncio`, `ruff`, `mypy`, `pre-commit`
-- [ ] 1.3 Add console entry point `tai-mcp-ssh = tai_mcp_ssh.cli:main` in `pyproject.toml`
-- [ ] 1.4 Create package layout `src/tai_mcp_ssh/{__init__.py, cli.py, server.py, config.py, audit.py, sessions.py, transfer.py, ssh.py, paths.py}` with stub implementations sufficient for `uv run tai-mcp-ssh --help` to succeed
-- [ ] 1.5 Run `uv sync` to create `.venv` and generate `uv.lock`; commit `uv.lock` (treats deps as reproducible for teammates)
-- [ ] 1.6 Verify `README.md` and `LICENSE` are in place (already created during the design phase); confirm `.gitignore` covers `.venv/` and `uv` caches
-- [ ] 1.7 Add `[tool.ruff]` and `[tool.mypy]` sections to `pyproject.toml` (target Python 3.11, ruff `line-length = 100`, enable common rule sets `E`, `F`, `I`, `UP`, `B`, `SIM`; mypy `strict = true` on `src/`)
-- [ ] 1.8 Activate pre-commit hooks locally: `uv run pre-commit install`; smoke-test with `uv run pre-commit run --all-files`
-- [ ] 1.9 CI placeholder: GitHub Actions workflow that runs `uv sync --frozen` and then `uv run pre-commit run --all-files` (which exercises ruff, ruff-format, mypy, and hygiene hooks in one step) plus `uv run pytest`
+- [x] 1.1 Create `pyproject.toml` (PEP 621, Python 3.11+, project name `tai-mcp-ssh`, author "PXL Smart ICT", `license = { file = "LICENSE" }`, build backend `hatchling`) with runtime deps: `mcp`, `asyncssh`, `keyring`, `click`, `tomli-w`, `python-ulid`
+- [x] 1.2 Add dev deps under `[dependency-groups].dev`: `pytest`, `pytest-asyncio`, `ruff`, `mypy`, `pre-commit`
+- [x] 1.3 Add console entry point `tai-mcp-ssh = tai_mcp_ssh.cli:main` in `pyproject.toml`
+- [x] 1.4 Create package layout `src/tai_mcp_ssh/{__init__.py, cli.py, server.py, config.py, audit.py, sessions.py, transfer.py, ssh.py, paths.py}` with stub implementations sufficient for `uv run tai-mcp-ssh --help` to succeed
+- [x] 1.5 Run `uv sync` to create `.venv` and generate `uv.lock`; commit `uv.lock` (treats deps as reproducible for teammates)
+- [x] 1.6 Verify `README.md` and `LICENSE` are in place (already created during the design phase); confirm `.gitignore` covers `.venv/` and `uv` caches
+- [x] 1.7 Add `[tool.ruff]` and `[tool.mypy]` sections to `pyproject.toml` (target Python 3.11, ruff `line-length = 100`, enable common rule sets `E`, `F`, `I`, `UP`, `B`, `SIM`; mypy `strict = true` on `src/`)
+- [x] 1.8 Activate pre-commit hooks locally: `uv run pre-commit install`; smoke-test with `uv run pre-commit run --all-files`
+- [x] 1.9 CI placeholder: GitHub Actions workflow that runs `uv sync --frozen` and then `uv run pre-commit run --all-files` (which exercises ruff, ruff-format, mypy, and hygiene hooks in one step) plus `uv run pytest`
 
 ## 2. Configuration and paths
 
-- [ ] 2.1 Implement `paths.py`: resolve XDG config / state dirs with macOS-specific overrides (`~/Library/Logs/tai-mcp-ssh/` for audit)
-- [ ] 2.2 Implement `config.py`: read `hosts.toml` via `tomllib`, validate schema (`host`, `user`, `port`, `auth`, `identity_file`, `password_ref`, `log_retention_days`), expose `load_hosts()` and `Host` dataclass
-- [ ] 2.3 Reject TOML files containing any literal password-like field; raise a clear error
-- [ ] 2.4 Implement TOML writes via `tomli-w` for use by the CLI `hosts add/remove`
-- [ ] 2.5 Unit tests covering: missing file, empty file, key-auth entry, password-auth entry, plaintext-password rejection, malformed entries
+- [x] 2.1 Implement `paths.py`: resolve XDG config / state dirs with macOS-specific overrides (`~/Library/Logs/tai-mcp-ssh/` for audit)
+- [x] 2.2 Implement `config.py`: read `hosts.toml` via `tomllib`, validate schema (`host`, `user`, `port`, `auth`, `identity_file`, `password_ref`, `log_retention_days`), expose `load_hosts()` and `Host` dataclass
+- [x] 2.3 Reject TOML files containing any literal password-like field; raise a clear error
+- [x] 2.4 Implement TOML writes via `tomli-w` for use by the CLI `hosts add/remove`
+- [x] 2.5 Unit tests covering: missing file, empty file, key-auth entry, password-auth entry, plaintext-password rejection, malformed entries
 
 ## 3. Audit log
 
-- [ ] 3.1 Implement `audit.py`: append-only JSONL writer with line-atomic writes (single `write` of the serialized line + `\n`)
-- [ ] 3.2 Provide `record(tool, host, **fields)` helper that auto-fills `ts` (ISO-8601 UTC), resolves the target file as `audit/<host>/<UTC-date>.jsonl` (defaulting `host = "_system"` for non-host events), and merges caller fields
-- [ ] 3.3 Lazily create per-host folders (`audit/<host>/`) with mode `0700` on first write to that host
-- [ ] 3.4 Detect UTC date rollover on every write so a long-running process correctly switches to the next day's file without restart
-- [ ] 3.5 Maintain a per-host open-file-handle cache keyed by `(host, date)` so we don't reopen on every record; close stale handles after rollover
-- [ ] 3.6 Per-host `asyncio.Lock` for serialized writes within a host; writes to different hosts run in parallel without contention
-- [ ] 3.7 Implement startup retention sweep: delete files in `audit/*/` whose filename-date is older than `retention_days` (default 90); record the sweep summary as a `_system` event; failures audited and non-fatal
-- [ ] 3.8 Read `[audit].retention_days` (optional) from `hosts.toml` via `config.py`
-- [ ] 3.9 Add a redaction helper that scrubs known-secret fields before write (`password`, `password_ref` resolved to the secret, etc.)
-- [ ] 3.10 Unit tests: same-host writes serialize, cross-host writes parallelize, UTC midnight rollover switches files, retention sweep deletes only old files, host folder lazy creation, secret redaction, `_system` fallback for missing host
+- [x] 3.1 Implement `audit.py`: append-only JSONL writer with line-atomic writes (single `write` of the serialized line + `\n`)
+- [x] 3.2 Provide `record(tool, host, **fields)` helper that auto-fills `ts` (ISO-8601 UTC), resolves the target file as `audit/<host>/<UTC-date>.jsonl` (defaulting `host = "_system"` for non-host events), and merges caller fields
+- [x] 3.3 Lazily create per-host folders (`audit/<host>/`) with mode `0700` on first write to that host
+- [x] 3.4 Detect UTC date rollover on every write so a long-running process correctly switches to the next day's file without restart
+- [x] 3.5 Maintain a per-host open-file-handle cache keyed by `(host, date)` so we don't reopen on every record; close stale handles after rollover
+- [x] 3.6 Per-host `asyncio.Lock` for serialized writes within a host; writes to different hosts run in parallel without contention
+- [x] 3.7 Implement startup retention sweep: delete files in `audit/*/` whose filename-date is older than `retention_days` (default 90); record the sweep summary as a `_system` event; failures audited and non-fatal
+- [x] 3.8 Read `[audit].retention_days` (optional) from `hosts.toml` via `config.py`
+- [x] 3.9 Add a redaction helper that scrubs known-secret fields before write (`password`, `password_ref` resolved to the secret, etc.)
+- [x] 3.10 Unit tests: same-host writes serialize, cross-host writes parallelize, UTC midnight rollover switches files, retention sweep deletes only old files, host folder lazy creation, secret redaction, `_system` fallback for missing host
 
 ## 4. SSH connection layer
 
