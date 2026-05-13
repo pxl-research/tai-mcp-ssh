@@ -292,6 +292,18 @@ def build_server(services: Services) -> Server:
                 error=str(exc),
             )
             raise
+        except Exception as exc:  # noqa: BLE001 — invariant: every call audited
+            # Catches ValueError from parse_session_id / unknown-tool dispatch
+            # and any other unexpected exception so the audit-log spec's
+            # "every tool invocation produces exactly one record" holds even
+            # for validation failures we didn't enumerate above.
+            await services.audit.record(
+                name,
+                host=_host_from_args(name, args),
+                status="error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         return [mtypes.TextContent(type="text", text=json.dumps(to_jsonable(result)))]
 
     return server

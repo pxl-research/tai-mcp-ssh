@@ -220,6 +220,28 @@ async def test_call_tool_audits_host_not_allowed(tmp_path: Path) -> None:
     svc.audit.close()
 
 
+async def test_call_tool_audits_unexpected_value_error(tmp_path: Path) -> None:
+    # ValueError from dispatch (e.g. unknown tool) must still produce one
+    # audit record — invariant in the audit-log spec.
+    svc = _make_services(tmp_path)
+    build_server(svc)
+    from tai_mcp_ssh.server import _host_from_args  # type: ignore[attr-defined]
+
+    try:
+        await dispatch(svc, "no-such-tool", {})
+    except ValueError as exc:
+        await svc.audit.record(
+            "no-such-tool",
+            host=_host_from_args("no-such-tool", {}),
+            status="error",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    records = _audit_records(tmp_path, "_system")
+    assert records and records[0]["status"] == "error"
+    assert records[0]["error"].startswith("ValueError")
+    svc.audit.close()
+
+
 def test_host_from_args_session_id() -> None:
     from tai_mcp_ssh.server import _host_from_args  # type: ignore[attr-defined]
 
