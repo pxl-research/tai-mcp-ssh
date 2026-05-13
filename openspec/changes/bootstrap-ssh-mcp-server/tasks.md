@@ -33,13 +33,13 @@
 
 ## 4. SSH connection layer
 
-- [ ] 4.1 Implement `ssh.py`: per-host `asyncssh` connection pool keyed by alias; reuse a single open connection per host
-- [ ] 4.2 Key auth: delegate to `~/.ssh/config` via `asyncssh`'s `config` argument
-- [ ] 4.3 Password auth: resolve `keychain://` reference via `keyring`, pass to `asyncssh.connect(password=...)`, drop the local reference after handshake
-- [ ] 4.4 Detect `tmux` presence on first connect (`command -v tmux`); cache the result per connection
-- [ ] 4.5 Ensure `~/.tai-ssh/logs/` exists with mode `0700` on first connect; record the housekeeping action in the audit log
-- [ ] 4.6 Implement log retention sweep (`find ~/.tai-ssh/logs -mtime +N -delete` equivalent via SFTP listing); best-effort, audited
-- [ ] 4.7 Unit tests with `asyncssh` mocked: connect resolves config, password auth retrieves keychain, tmux-missing path
+- [x] 4.1 Implement `ssh.py`: per-host `asyncssh` connection pool keyed by alias; reuse a single open connection per host
+- [x] 4.2 Key auth: delegate to `~/.ssh/config` via `asyncssh`'s `config` argument
+- [x] 4.3 Password auth: resolve `keychain://` reference via `keyring`, pass to `asyncssh.connect(password=...)`, drop the local reference after handshake
+- [x] 4.4 Detect `tmux` presence on first connect (`command -v tmux`); cache the result per connection
+- [x] 4.5 Ensure `~/.tai-ssh/logs/` exists with mode `0700` on first connect; record the housekeeping action in the audit log
+- [x] 4.6 Implement log retention sweep (`find ~/.tai-ssh/logs -mtime +N -delete` equivalent via SFTP listing); best-effort, audited
+- [x] 4.7 Unit tests with `asyncssh` mocked: connect resolves config, password auth retrieves keychain, tmux-missing path
 
 ## 5. Remote sessions (tmux)
 
