@@ -97,3 +97,24 @@ The MCP SHALL expose `session_list()` returning all known active sessions across
 - **THEN** the MCP SHALL execute the equivalent of `tmux kill-session -t tai-mcp/build` on `pi-living`
 - **AND** the action SHALL be audited
 - **AND** subsequent `session_run` calls to that session_id SHALL auto-create a fresh tmux session
+
+### Requirement: Transparent recovery from transport failure
+When the SSH transport to a managed host dies (peer reboot, network drop, sshd kill), the MCP SHALL evict the dead connection from its pool and surface a typed `host-unreachable` error to the caller. Subsequent tool calls against the same host SHALL transparently open a fresh connection.
+
+#### Scenario: Tool call against a host that rebooted
+- **WHEN** a managed host reboots while the MCP holds a cached SSH connection
+- **AND** the LLM invokes any tool against that host
+- **THEN** the first such call MAY fail with a `host-unreachable` error
+- **AND** the dead connection SHALL be evicted from the pool
+- **AND** the next tool call SHALL open a fresh connection and succeed without operator intervention
+
+#### Scenario: Session bookkeeping cleared on transport loss
+- **WHEN** `session_run` or `session_wait` raises a `host-unreachable` error
+- **THEN** any local session state associated with that `session_id` SHALL be cleared (the remote tmux server is gone by definition)
+- **AND** the next `session_run` against the same `session_id` SHALL create a fresh tmux session
+
+#### Scenario: session_kill on an unreachable host
+- **WHEN** `session_kill` is invoked but the host is unreachable
+- **THEN** the local session bookkeeping SHALL be cleared regardless
+- **AND** the response SHALL indicate the remote tmux session was not confirmed killed (`killed: false`)
+- **AND** the call SHALL be audited
