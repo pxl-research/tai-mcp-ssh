@@ -68,32 +68,32 @@
 
 ## 7. MCP server wiring
 
-- [ ] 7.1 Implement `server.py` using the `mcp` SDK: register the seven tools (`hosts`, `session_list`, `session_run`, `session_wait`, `session_kill`, `put`, `get`)
-- [ ] 7.2 Define tool input schemas with minimal fields and concise descriptions (token-budget conscious)
-- [ ] 7.3 Wire every tool through the audit log: even rejected calls produce a record
-- [ ] 7.4 Map internal exceptions to MCP error responses without leaking secrets
-- [ ] 7.5 Implement stdio transport entry point invoked from `cli.py serve`
+- [x] 7.1 Implement `server.py` using the `mcp` SDK: register the seven tools (`hosts`, `session_list`, `session_run`, `session_wait`, `session_kill`, `put`, `get`)
+- [x] 7.2 Define tool input schemas with minimal fields and concise descriptions (token-budget conscious)
+- [x] 7.3 Wire every tool through the audit log: even rejected calls produce a record
+- [x] 7.4 Map internal exceptions to MCP error responses without leaking secrets
+- [x] 7.5 Implement stdio transport entry point invoked from `cli.py serve`
 
 ## 8. CLI
 
-- [ ] 8.1 Implement `cli.py` with `click`, top-level group `tai-mcp-ssh`
-- [ ] 8.2 `hosts add <alias>`: interactive prompts (host, user, port, auth selector); `getpass` for password; refuse any password supplied via argv or non-TTY stdin; write TOML; store keychain
-- [ ] 8.3 `hosts list`: read TOML, print in tabular form, redact secrets, mark password-auth as `(keychain)`
-- [ ] 8.4 `hosts remove <alias>`: confirm, delete TOML entry, delete keychain entry (ignore if absent)
-- [ ] 8.5 `hosts test <alias>`: connect, run `whoami`, check tmux, check log dir writability, print latency and per-check status
-- [ ] 8.6 `audit tail [-n N] [--host X] [--session Y] [--tool Z] [--pretty]`: stream the JSONL file with optional filters and pretty-printing
-- [ ] 8.7 `serve`: launch `server.py` over stdio
-- [ ] 8.8 CLI integration tests using `click.testing.CliRunner`
+- [x] 8.1 Implement `cli.py` with `click`, top-level group `tai-mcp-ssh`
+- [x] 8.2 `hosts add <alias>`: interactive prompts (host, user, port, auth selector); `getpass` for password; refuse any password supplied via argv or non-TTY stdin; write TOML; store keychain
+- [x] 8.3 `hosts list`: read TOML, print in tabular form, redact secrets, mark password-auth as `(keychain)`
+- [x] 8.4 `hosts remove <alias>`: confirm, delete TOML entry, delete keychain entry (ignore if absent)
+- [x] 8.5 `hosts test <alias>`: connect, run `whoami`, check tmux, check log dir writability, print latency and per-check status
+- [x] 8.6 `audit tail [-n N] [--host X] [--session Y] [--tool Z] [--pretty]`: stream the JSONL file with optional filters and pretty-printing
+- [x] 8.7 `serve`: launch `server.py` over stdio
+- [x] 8.8 CLI integration tests using `click.testing.CliRunner`
 
 ## 9. Documentation
 
-- [ ] 9.1 README: install instructions, prerequisite list (tmux on remote, Python 3.11+, ssh setup)
-- [ ] 9.2 README: step-by-step host onboarding via `hosts add` and `hosts test`
-- [ ] 9.3 README: the sudo-handoff flow, with the exact `ssh ... -t tmux attach -t tai-mcp/<name>` command and the Ctrl-B D detach hint
-- [ ] 9.4 README: recommended `NOPASSWD` sudoers snippets for common LLM admin tasks
-- [ ] 9.5 README: stage-and-move pattern for root-owned file installs
-- [ ] 9.6 README: document the local-MCP topology assumption and that remote-MCP is out of scope for v1
-- [ ] 9.7 README: how to inspect and rotate the audit log
+- [x] 9.1 README: install instructions, prerequisite list (tmux on remote, Python 3.11+, ssh setup)
+- [x] 9.2 README: step-by-step host onboarding via `hosts add` and `hosts test`
+- [x] 9.3 README: the sudo-handoff flow, with the exact `ssh ... -t tmux attach -t tai-mcp/<name>` command and the Ctrl-B D detach hint
+- [x] 9.4 README: recommended `NOPASSWD` sudoers snippets for common LLM admin tasks
+- [x] 9.5 README: stage-and-move pattern for root-owned file installs
+- [x] 9.6 README: document the local-MCP topology assumption and that remote-MCP is out of scope for v1
+- [x] 9.7 README: how to inspect and rotate the audit log
 
 ## 10. End-to-end smoke
 

@@ -26,6 +26,10 @@ A small, opinionated [MCP](https://modelcontextprotocol.io) server that lets an 
 - `tmux` installed on each managed remote host
 - SSH access to those hosts (key auth strongly preferred)
 
+## Topology
+
+**The MCP and the human operator are assumed to be on the same machine or LAN as the managed host.** The sudo handoff works by asking you to `ssh <host> -t tmux attach -t tai-mcp/<name>` in a separate terminal — that requires you to be able to reach the host directly. Running the MCP on a remote bastion while you sit elsewhere is out of scope for v1; the handoff would have nowhere to land. If you need bastion-style operation, configure `NOPASSWD` sudoers for the commands the LLM uses (see below) so the handoff is rarely needed.
+
 ## Development setup
 
 Clone the repo, then:
@@ -137,6 +141,28 @@ The LLM will tell you what to do. The flow:
 ```
 
 Both halves are independently audited.
+
+## Recommended: NOPASSWD sudoers for routine ops
+
+The sudo-handoff flow exists for ad-hoc commands, but for the small set of operations the LLM repeats often you can sidestep it entirely by granting `NOPASSWD` for those exact commands. Drop a file at `/etc/sudoers.d/tai-mcp` on each managed host (edit with `sudo visudo -f /etc/sudoers.d/tai-mcp`):
+
+```sudoers
+# Allow the SSH user to run a curated set of admin commands without a password.
+# Replace `pi` with your SSH user; tighten the list to what you actually trust.
+pi ALL=(root) NOPASSWD: /usr/bin/apt update
+pi ALL=(root) NOPASSWD: /usr/bin/apt-get update
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl status *
+pi ALL=(root) NOPASSWD: /usr/bin/journalctl *
+pi ALL=(root) NOPASSWD: /usr/bin/docker ps, /usr/bin/docker logs *
+```
+
+Two reasons to do this:
+
+- **Auditability**: the allowed commands are explicitly enumerated in `/etc/sudoers.d/tai-mcp`, so you and any human auditor can read off exactly what elevated power the LLM has.
+- **Smoothness**: those commands no longer trigger the `needs_password` handoff. The LLM just runs them.
+
+For everything else, the `tmux attach` handoff still works.
 
 ## Audit log
 
