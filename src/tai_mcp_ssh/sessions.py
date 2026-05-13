@@ -82,6 +82,11 @@ class _SessionState:
     started_at: datetime | None = None
     command: str | None = None
     reason: str | None = None
+    # Incremental-read cursor over the remote per-command log file.
+    # log_offset = number of bytes already pulled into log_buffer; each
+    # poll only fetches new bytes via `tail -c +<offset+1>`.
+    log_offset: int = 0
+    log_buffer: str = ""
 
 
 def parse_session_id(session_id: str) -> tuple[str, str]:
@@ -257,12 +262,11 @@ class SessionManager:
         assert state.log_id is not None
         assert state.log_path is not None
         log_id = state.log_id
-        log_path = state.log_path
         done_re = re.compile(rf"^__TAI_DONE__(\d+)__{re.escape(log_id)}__\s*$", re.MULTILINE)
 
         call_start = self._now()
         while True:
-            content = await self._read_log(conn, log_path)
+            content = await self._read_log(conn, state)
 
             # 1. Completion sentinel — the only "done" signal we trust.
             m = done_re.search(content)
@@ -299,11 +303,25 @@ class SessionManager:
 
             await asyncio.sleep(self._poll_interval)
 
-    async def _read_log(self, conn: Connection, log_path: str) -> str:
-        result = await conn.run(f"cat {shlex.quote(log_path)}", check=False)
+    async def _read_log(self, conn: Connection, state: _SessionState) -> str:
+        """Read only the bytes appended since the last poll, returning the full buffer.
+
+        Avoids re-shipping the entire log file on every poll: a noisy 10 MB
+        build polled every 200ms would otherwise transfer gigabytes total.
+        Uses ``tail -c +<offset+1>`` (1-indexed) so a fresh file with
+        offset 0 fetches the whole file on the first poll.
+        """
+        assert state.log_path is not None
+        cmd = f"tail -c +{state.log_offset + 1} {shlex.quote(state.log_path)}"
+        result = await conn.run(cmd, check=False)
         if result.exit_status != 0:
-            return ""
-        return _as_str(result.stdout)
+            # File may not exist yet; return whatever we've buffered so far.
+            return state.log_buffer
+        chunk = _as_str(result.stdout)
+        if chunk:
+            state.log_buffer += chunk
+            state.log_offset += len(chunk.encode("utf-8"))
+        return state.log_buffer
 
     def _attach_hint(self, state: _SessionState) -> str:
         return f"ssh {state.host} -t tmux attach -t {_TMUX_PREFIX}/{state.name}"
@@ -368,6 +386,8 @@ class SessionManager:
         state.reason = None
         state.started_at = None
         state.last_used_at = self._now()
+        state.log_offset = 0
+        state.log_buffer = ""
 
     async def _audit_event(self, state: _SessionState, result: RunResult, *, tool: str) -> None:
         duration_ms: int | None = None

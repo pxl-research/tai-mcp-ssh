@@ -241,7 +241,7 @@ async def test_run_done_returns_full_output(tmp_path: Path) -> None:
         captured_log_id["id"] = log_id
         return FakeProc(0, _make_log(log_id, output="hello\nworld"), "")
 
-    fc.add_handler(r"^cat ", cat_handler)
+    fc.add_handler(r"^tail -c ", cat_handler)
 
     result = await sm.run("pi/default", "echo hello && echo world")
     assert result.status == "done"
@@ -257,7 +257,7 @@ async def test_run_done_returns_full_output(tmp_path: Path) -> None:
 async def test_run_creates_tmux_session_idempotently(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -281,7 +281,7 @@ async def test_run_creates_tmux_session_idempotently(tmp_path: Path) -> None:
 async def test_run_does_not_recreate_session(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -304,7 +304,7 @@ async def test_run_does_not_recreate_session(tmp_path: Path) -> None:
 async def test_run_returns_busy_when_session_locked(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     # cat returns NO completion — keep the first run polling.
-    fc.add_handler(r"^cat ", lambda _cmd: FakeProc(0, "", ""))
+    fc.add_handler(r"^tail -c ", lambda _cmd: FakeProc(0, "", ""))
 
     audit = AuditLog(root=tmp_path)
     sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.05)  # type: ignore[arg-type]
@@ -326,7 +326,7 @@ async def test_run_returns_busy_when_session_locked(tmp_path: Path) -> None:
 async def test_run_returns_needs_password_on_sudo_prompt(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             "starting...\n[sudo] password for pi: ",
@@ -347,7 +347,7 @@ async def test_run_returns_needs_password_on_sudo_prompt(tmp_path: Path) -> None
 async def test_run_times_out_returns_still_running(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     # Empty log; no sentinel, no prompt. Manager must hit timeout.
-    fc.add_handler(r"^cat ", lambda _cmd: FakeProc(0, "", ""))
+    fc.add_handler(r"^tail -c ", lambda _cmd: FakeProc(0, "", ""))
 
     audit = AuditLog(root=tmp_path)
     sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.05)  # type: ignore[arg-type]
@@ -375,7 +375,7 @@ async def test_wait_resumes_after_sudo_handoff(tmp_path: Path) -> None:
 
     # Phase 1: cat returns a sudo-prompt log.
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda _cmd: FakeProc(0, "starting...\n[sudo] password for pi: ", ""),
     )
     r1 = await sm.run("pi/default", "sudo whoami")
@@ -385,7 +385,7 @@ async def test_wait_resumes_after_sudo_handoff(tmp_path: Path) -> None:
     # Phase 2: replace handler with a completed log.
     fc.handlers.clear()
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda _cmd: FakeProc(0, _make_log(log_id, output="root", exit_code=0), ""),
     )
     r2 = await sm.wait("pi/default")
@@ -398,7 +398,7 @@ async def test_wait_resumes_after_sudo_handoff(tmp_path: Path) -> None:
 async def test_kill_terminates_session_and_clears_state(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -426,7 +426,7 @@ async def test_kill_terminates_session_and_clears_state(tmp_path: Path) -> None:
 async def test_list_sessions_shape(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -451,10 +451,38 @@ async def test_list_sessions_shape(tmp_path: Path) -> None:
     audit.close()
 
 
+async def test_poll_uses_incremental_tail_not_full_cat(tmp_path: Path) -> None:
+    # Each poll must fetch only bytes after state.log_offset via
+    # `tail -c +<offset+1>`, never re-shipping the whole file.
+    fc = FakeConnection("pi")
+    captured_cmds: list[str] = []
+
+    def handler(cmd: str) -> FakeProc:
+        captured_cmds.append(cmd)
+        m = re.search(r"/logs/([0-9A-Z]+)\.log", cmd)
+        if not m:
+            return FakeProc(0, "", "")
+        return FakeProc(0, _make_log(m.group(1), output="ok"), "")
+
+    fc.add_handler(r"^tail -c ", handler)
+
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "echo ok")
+    log_reads = [c for c in captured_cmds if c.startswith("tail -c ")]
+    assert log_reads, "expected at least one tail -c read"
+    # First read starts from byte 1 (whole file from offset 0).
+    assert log_reads[0].startswith("tail -c +1 ")
+    # `cat <path>` must never appear — that's the regression we're guarding.
+    assert not any(c.startswith("cat ") for c in captured_cmds)
+    audit.close()
+
+
 async def test_audit_records_session_run_with_reason(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
