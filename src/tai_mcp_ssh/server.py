@@ -259,6 +259,51 @@ def _host_from_args(name: str, args: dict[str, Any]) -> str | None:
     return None
 
 
+async def _dispatch_and_audit(services: Services, name: str, args: dict[str, Any]) -> Any:
+    """Dispatch a tool call and ensure exactly one audit record per call.
+
+    Three failure modes:
+
+    - ``HostNotAllowed`` / ``TmuxMissing`` / ``KeychainUnavailable``: domain
+      rejections not yet recorded by a manager — audited as ``rejected``.
+    - Other ``TaiMcpSshError``: audited as ``error`` unless the raising
+      manager already recorded a richer entry and set ``exc.audited = True``.
+    - Anything else (``ValueError`` from ``parse_session_id``, unknown-tool
+      dispatch, …): audited as ``error`` with a typed prefix so the
+      every-call invariant holds even for validation paths we didn't
+      enumerate above.
+
+    All branches re-raise; the caller maps to MCP error responses.
+    """
+    try:
+        return await dispatch(services, name, args)
+    except (HostNotAllowed, TmuxMissing, KeychainUnavailable) as exc:
+        await services.audit.record(
+            name,
+            host=_host_from_args(name, args),
+            status="rejected",
+            error=str(exc),
+        )
+        raise
+    except TaiMcpSshError as exc:
+        if not getattr(exc, "audited", False):
+            await services.audit.record(
+                name,
+                host=_host_from_args(name, args),
+                status="error",
+                error=str(exc),
+            )
+        raise
+    except Exception as exc:  # noqa: BLE001 — invariant: every call audited
+        await services.audit.record(
+            name,
+            host=_host_from_args(name, args),
+            status="error",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+
+
 def build_server(services: Services) -> Server:
     """Wire the dispatch logic into a low-level MCP :class:`Server`."""
     server: Server = Server(SERVER_NAME)
@@ -272,26 +317,7 @@ def build_server(services: Services) -> Server:
     @server.call_tool()  # type: ignore[untyped-decorator]
     async def _call_tool(name: str, arguments: dict[str, Any] | None) -> list[mtypes.TextContent]:
         args = arguments or {}
-        try:
-            result = await dispatch(services, name, args)
-        except (HostNotAllowed, TmuxMissing, KeychainUnavailable) as exc:
-            # Domain rejections that aren't yet recorded by a manager are
-            # audited here so the every-call invariant holds.
-            await services.audit.record(
-                name,
-                host=_host_from_args(name, args),
-                status="rejected",
-                error=str(exc),
-            )
-            raise
-        except TaiMcpSshError as exc:
-            await services.audit.record(
-                name,
-                host=_host_from_args(name, args),
-                status="error",
-                error=str(exc),
-            )
-            raise
+        result = await _dispatch_and_audit(services, name, args)
         return [mtypes.TextContent(type="text", text=json.dumps(to_jsonable(result)))]
 
     return server

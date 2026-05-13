@@ -1,5 +1,8 @@
-## ADDED Requirements
+# remote-sessions Specification
 
+## Purpose
+Give the LLM long-lived shell sessions on managed hosts that survive across multiple tool calls. Each session is a named tmux session on the remote (`tai-mcp/<name>`), identified by a composite `<host>/<name>` ID and addressed via `session_run`, `session_wait`, `session_list`, and `session_kill`. tmux preserves cwd, environment, exported variables, function definitions, and any backgrounded children between calls — the foundation the LLM needs to drive a real interactive workflow. Completion is detected via per-command sentinels; known interactive prompts (sudo, hostkey, apt confirmations) are recognised at the pane tail so the LLM can hand off cleanly when human input is required; transport failures (peer reboot, network drop) are surfaced as a typed `host-unreachable` error and the next call transparently reconnects.
+## Requirements
 ### Requirement: Composite session identifier
 Sessions SHALL be identified by a composite ID of the form `<host>/<name>`, where `<host>` matches an allowlist alias and `<name>` is a session label chosen by the LLM (default `"default"`). The host SHALL be derivable from the session ID without any additional lookup.
 
@@ -97,3 +100,24 @@ The MCP SHALL expose `session_list()` returning all known active sessions across
 - **THEN** the MCP SHALL execute the equivalent of `tmux kill-session -t tai-mcp/build` on `pi-living`
 - **AND** the action SHALL be audited
 - **AND** subsequent `session_run` calls to that session_id SHALL auto-create a fresh tmux session
+
+### Requirement: Transparent recovery from transport failure
+When the SSH transport to a managed host dies (peer reboot, network drop, sshd kill), the MCP SHALL evict the dead connection from its pool and surface a typed `host-unreachable` error to the caller. Subsequent tool calls against the same host SHALL transparently open a fresh connection.
+
+#### Scenario: Tool call against a host that rebooted
+- **WHEN** a managed host reboots while the MCP holds a cached SSH connection
+- **AND** the LLM invokes any tool against that host
+- **THEN** the first such call MAY fail with a `host-unreachable` error
+- **AND** the dead connection SHALL be evicted from the pool
+- **AND** the next tool call SHALL open a fresh connection and succeed without operator intervention
+
+#### Scenario: Session bookkeeping cleared on transport loss
+- **WHEN** `session_run` or `session_wait` raises a `host-unreachable` error
+- **THEN** any local session state associated with that `session_id` SHALL be cleared (the remote tmux server is gone by definition)
+- **AND** the next `session_run` against the same `session_id` SHALL create a fresh tmux session
+
+#### Scenario: session_kill on an unreachable host
+- **WHEN** `session_kill` is invoked but the host is unreachable
+- **THEN** the local session bookkeeping SHALL be cleared regardless
+- **AND** the response SHALL indicate the remote tmux session was not confirmed killed (`killed: false`)
+- **AND** the call SHALL be audited

@@ -33,3 +33,16 @@ class KeychainUnavailable(TaiMcpSshError):
 
 class SecretInCommand(TaiMcpSshError):
     """Command appears to contain a literal secret; refusing to forward it."""
+
+
+class TransferDenied(TaiMcpSshError):
+    """SFTP put/get failed because the SSH user lacks permission."""
+
+
+class HostUnreachable(TaiMcpSshError):
+    """SSH transport to the host is observed to be dead.
+
+    The cached connection is marked dead at the point this is raised; the
+    pool evicts it on the next ``get()`` call so a retry transparently
+    reconnects.
+    """

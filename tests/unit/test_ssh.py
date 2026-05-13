@@ -21,6 +21,7 @@ from tai_mcp_ssh.audit import AuditLog
 from tai_mcp_ssh.config import Host
 from tai_mcp_ssh.errors import (
     HostNotAllowed,
+    HostUnreachable,
     KeychainUnavailable,
     TmuxMissing,
 )
@@ -137,6 +138,8 @@ async def test_get_opens_and_caches(tmp_path: Path) -> None:
 async def test_key_auth_connect_kwargs(tmp_path: Path) -> None:
     audit = AuditLog(root=tmp_path)
     factory = FakeConnectFactory(run_handler=_default_handler)
+    ssh_config = tmp_path / "ssh_config"
+    ssh_config.touch()  # gated on existence by `_build_connect_kwargs`
     pool = ConnectionPool(
         hosts={
             "pi": Host(
@@ -150,7 +153,7 @@ async def test_key_auth_connect_kwargs(tmp_path: Path) -> None:
         },
         audit=audit,
         connect=factory,
-        ssh_config=tmp_path / "ssh_config",
+        ssh_config=ssh_config,
     )
     await pool.get("pi")
     kw = factory.connect_calls[0]
@@ -159,7 +162,44 @@ async def test_key_auth_connect_kwargs(tmp_path: Path) -> None:
     assert kw["port"] == 2222
     assert kw["client_keys"] == ["~/.ssh/pi_ed25519"]
     assert "password" not in kw
-    assert kw["config"] == [str(tmp_path / "ssh_config")]
+    assert kw["config"] == [str(ssh_config)]
+    await pool.close_all()
+    audit.close()
+
+
+async def test_keepalive_kwargs_sent_to_asyncssh(tmp_path: Path) -> None:
+    # Regression for #6: surface a dead transport within ~90s (3 × 30s)
+    # so the pool's eviction path runs instead of hanging on kernel TCP
+    # timeout.
+    audit = AuditLog(root=tmp_path)
+    factory = FakeConnectFactory(run_handler=_default_handler)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi")},
+        audit=audit,
+        connect=factory,
+    )
+    await pool.get("pi")
+    kw = factory.connect_calls[0]
+    assert kw["keepalive_interval"] == 30
+    assert kw["keepalive_count_max"] == 3
+    await pool.close_all()
+    audit.close()
+
+
+async def test_missing_ssh_config_is_tolerated(tmp_path: Path) -> None:
+    # Regression for #3: a non-existent ssh_config must not crash connect;
+    # we skip the kwarg and let asyncssh use its own defaults.
+    audit = AuditLog(root=tmp_path)
+    factory = FakeConnectFactory(run_handler=_default_handler)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi")},
+        audit=audit,
+        connect=factory,
+        ssh_config=tmp_path / "does-not-exist",
+    )
+    await pool.get("pi")
+    kw = factory.connect_calls[0]
+    assert "config" not in kw
     await pool.close_all()
     audit.close()
 
@@ -367,6 +407,89 @@ async def test_remote_sweep_uses_custom_retention(tmp_path: Path) -> None:
     await pool.get("pi")
     await _flush_background_tasks()
     await pool.close_all()
+    audit.close()
+
+
+async def test_dead_transport_raises_host_unreachable_and_evicts(tmp_path: Path) -> None:
+    """After a transport-dead error, the conn is marked dead and dropped on next get()."""
+    audit = AuditLog(root=tmp_path)
+
+    call_count = {"n": 0}
+
+    def handler(command: str) -> FakeProcess:
+        if command == "command -v tmux":
+            return FakeProcess(0, "/usr/bin/tmux\n", "")
+        if command == "echo $HOME":
+            return FakeProcess(0, "/home/pi\n", "")
+        if command.startswith("mkdir -p -m 0700") or "-delete -print" in command:
+            return FakeProcess(0, "", "")
+        # The first "real" run after _ensure_ready raises a transport-dead error.
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ConnectionResetError("peer rebooted")
+        return FakeProcess(0, "", "")
+
+    factory = FakeConnectFactory(run_handler=handler)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi", host="192.168.1.42")},
+        audit=audit,
+        connect=factory,
+    )
+
+    conn = await pool.get("pi")
+    with pytest.raises(HostUnreachable):
+        await conn.run("anything")
+    assert conn.dead is True
+
+    # Next get() must evict the dead conn and open a fresh one.
+    conn2 = await pool.get("pi")
+    assert conn2 is not conn
+    assert conn2.dead is False
+    # Sanity: a follow-up call on the fresh conn works.
+    result = await conn2.run("anything")
+    assert result.exit_status == 0
+    audit.close()
+
+
+async def test_open_failure_raises_host_unreachable(tmp_path: Path) -> None:
+    """Initial connect() failure surfaces as HostUnreachable, not raw OSError."""
+    audit = AuditLog(root=tmp_path)
+
+    async def bad_connect(**_: Any) -> Any:
+        raise OSError("network unreachable")
+
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi", host="192.168.1.42")},
+        audit=audit,
+        connect=bad_connect,
+    )
+    with pytest.raises(HostUnreachable, match="network unreachable"):
+        await pool.get("pi")
+    audit.close()
+
+
+async def test_ensure_ready_failure_evicts_from_cache(tmp_path: Path) -> None:
+    """If bootstrap dies mid-handshake, the cache must not retain the half-open conn."""
+    audit = AuditLog(root=tmp_path)
+
+    def handler(command: str) -> FakeProcess:
+        # _ensure_ready's first call is `command -v tmux`; blow up there.
+        if command == "command -v tmux":
+            raise ConnectionResetError("peer rebooted")
+        return FakeProcess(0, "", "")
+
+    factory = FakeConnectFactory(run_handler=handler)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi", host="192.168.1.42")},
+        audit=audit,
+        connect=factory,
+    )
+    with pytest.raises(HostUnreachable):
+        await pool.get("pi")
+    # Second attempt must build a brand-new connection (factory called twice).
+    factory.run_handler = _default_handler
+    await pool.get("pi")
+    assert len(factory.connect_calls) == 2
     audit.close()
 
 

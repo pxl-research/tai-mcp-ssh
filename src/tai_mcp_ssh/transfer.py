@@ -10,14 +10,36 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+import asyncssh
+
 from tai_mcp_ssh import paths
 from tai_mcp_ssh.audit import AuditLog
-from tai_mcp_ssh.ssh import ConnectionPool
+from tai_mcp_ssh.errors import HostUnreachable, TransferDenied
+from tai_mcp_ssh.ssh import DEAD_CONN_ERRORS, ConnectionPool
 
 _CHUNK_BYTES = 64 * 1024
+
+# asyncssh exposes SFTP status codes as integers on SFTPError.code.
+# 3 is FX_PERMISSION_DENIED per RFC draft-ietf-secsh-filexfer.
+_SFTP_PERMISSION_DENIED = 3
+
+
+def _stage_and_move_hint(host: str, remote_path: str) -> str:
+    """One-line recipe shown when a `put` to a write-protected destination fails."""
+    name = Path(remote_path).name
+    staging = f"/tmp/{name}"
+    # shlex.quote on the shell paths; !r on the outer Python literals so
+    # Python chooses non-colliding quotes if either path contains '.
+    shell_cmd = f"sudo mv {shlex.quote(staging)} {shlex.quote(remote_path)}"
+    return (
+        f"the SSH user cannot write {host}:{remote_path}. "
+        f"Use stage-and-move: put({host!r}, <local>, {staging!r}) "
+        f"then session_run({host + '/default'!r}, {shell_cmd!r})."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,17 +75,42 @@ class TransferManager:
         size = local.stat().st_size
 
         conn = await self._pool.get(host)
-        async with (
-            await conn.start_sftp() as sftp,
-            sftp.open(remote_path, "wb") as remote_f,
-        ):
-            with local.open("rb") as local_f:
-                while True:
-                    chunk = local_f.read(_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    await remote_f.write(chunk)
+        try:
+            async with (
+                await conn.start_sftp() as sftp,
+                sftp.open(remote_path, "wb") as remote_f,
+            ):
+                with local.open("rb") as local_f:
+                    while True:
+                        chunk = local_f.read(_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        await remote_f.write(chunk)
+        except asyncssh.SFTPError as exc:
+            if exc.code != _SFTP_PERMISSION_DENIED:
+                # Not a permissions issue — let the server boundary audit it
+                # with status=error and surface the real cause to the caller.
+                raise
+            await self._audit.record(
+                "put",
+                host=host,
+                local_path=str(local),
+                remote_path=remote_path,
+                reason=reason,
+                status="rejected",
+                error=str(exc),
+            )
+            denied = TransferDenied(_stage_and_move_hint(host, remote_path))
+            denied.audited = True  # type: ignore[attr-defined]
+            raise denied from exc
+        except DEAD_CONN_ERRORS as exc:
+            # Transport died mid-write. start_sftp() is wrapped at the
+            # Connection boundary, but sftp.open / remote_f.write are not,
+            # so we mark the conn dead here so the pool evicts it on the
+            # next get() instead of handing back a corpse.
+            conn.mark_dead()
+            raise HostUnreachable(f"{host}: {exc}") from exc
 
         sha = digest.hexdigest()
         await self._audit.record(
@@ -100,20 +147,45 @@ class TransferManager:
         size = 0
 
         conn = await self._pool.get(host)
-        async with (
-            await conn.start_sftp() as sftp,
-            sftp.open(remote_path, "rb") as remote_f,
-        ):
-            with dest.open("wb") as local_f:
-                while True:
-                    chunk = await remote_f.read(_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    # asyncssh returns str|bytes; SFTP binary mode yields bytes.
-                    data = chunk if isinstance(chunk, bytes) else chunk.encode()
-                    digest.update(data)
-                    local_f.write(data)
-                    size += len(data)
+        try:
+            async with (
+                await conn.start_sftp() as sftp,
+                sftp.open(remote_path, "rb") as remote_f,
+            ):
+                with dest.open("wb") as local_f:
+                    while True:
+                        chunk = await remote_f.read(_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        # asyncssh returns str|bytes; SFTP binary mode yields bytes.
+                        data = chunk if isinstance(chunk, bytes) else chunk.encode()
+                        digest.update(data)
+                        local_f.write(data)
+                        size += len(data)
+        except asyncssh.SFTPError as exc:
+            if exc.code != _SFTP_PERMISSION_DENIED:
+                raise
+            await self._audit.record(
+                "get",
+                host=host,
+                remote_path=remote_path,
+                local_path=str(dest),
+                reason=reason,
+                status="rejected",
+                error=str(exc),
+            )
+            shell_cmd = f"sudo cat {shlex.quote(remote_path)} > /tmp/..."
+            denied = TransferDenied(
+                f"the SSH user cannot read {host}:{remote_path}. "
+                f"Either ensure read permissions or stage it via "
+                f"session_run({host + '/default'!r}, {shell_cmd!r}) "
+                f"first and `get` from /tmp."
+            )
+            denied.audited = True  # type: ignore[attr-defined]
+            raise denied from exc
+        except DEAD_CONN_ERRORS as exc:
+            conn.mark_dead()
+            raise HostUnreachable(f"{host}: {exc}") from exc
 
         sha = digest.hexdigest()
         await self._audit.record(

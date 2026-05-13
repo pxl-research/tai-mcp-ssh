@@ -37,6 +37,7 @@ tai-mcp-ssh = "tai_mcp_ssh.cli:main"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
     "ruff>=0.6",
     "mypy>=1.10",
     "pre-commit>=4",
@@ -61,4 +62,19 @@ files = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --cov=tai_mcp_ssh --cov-report=term-missing --cov-fail-under=80"
+
+[tool.coverage.run]
+source = ["src/tai_mcp_ssh"]
+
+[tool.coverage.report]
+# `if __name__ == "__main__":` lines aren't reached by pytest and
+# don't need coverage; same for type-checking-only imports.
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+show_missing = true
+skip_covered = false

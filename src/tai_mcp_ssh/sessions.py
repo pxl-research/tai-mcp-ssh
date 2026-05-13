@@ -20,9 +20,15 @@ from typing import Any, Literal
 from ulid import ULID
 
 from tai_mcp_ssh.audit import AuditLog
+from tai_mcp_ssh.errors import HostUnreachable
 from tai_mcp_ssh.ssh import Connection, ConnectionPool, _as_str
 
 _TMUX_PREFIX = "tai-mcp"
+
+# Session names are interpolated into remote shell commands; restrict to a
+# safe character set so a session_id like `pi/foo;touch /tmp/pwned` can't
+# inject. Hosts are already constrained by the allowlist at the call site.
+_SAFE_SESSION_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Output-slice thresholds (per output-capture spec).
 _FULL_THRESHOLD_LINES = 50
@@ -82,6 +88,15 @@ class _SessionState:
     started_at: datetime | None = None
     command: str | None = None
     reason: str | None = None
+    # Incremental-read cursor over the remote per-command log file.
+    # log_offset = number of bytes already pulled into log_buffer; each
+    # poll only fetches new bytes via `tail -c +<offset+1>`.
+    log_offset: int = 0
+    log_buffer: str = ""
+    # Highest buffer index we've already searched for the DONE sentinel.
+    # Next scan starts a small overlap behind this so a marker straddling
+    # two chunks still matches.
+    scan_pos: int = 0
 
 
 def parse_session_id(session_id: str) -> tuple[str, str]:
@@ -91,6 +106,11 @@ def parse_session_id(session_id: str) -> tuple[str, str]:
     host, _, name = session_id.partition("/")
     if not host or not name:
         raise ValueError(f"Invalid session_id {session_id!r}: host and name must both be non-empty")
+    if not _SAFE_SESSION_NAME.fullmatch(name):
+        raise ValueError(
+            f"Invalid session_id {session_id!r}: name must match [A-Za-z0-9._-]+ "
+            f"(no shell metacharacters)"
+        )
     return host, name
 
 
@@ -127,53 +147,77 @@ class SessionManager:
         timeout: float = 30.0,
     ) -> RunResult:
         host, name = parse_session_id(session_id)
-        conn = await self._pool.get(host)
+        try:
+            conn = await self._pool.get(host)
 
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            state = self._sessions.get(session_id)
-            if state is not None and state.log_id is not None:
-                # Session is mid-command — refuse with `busy` and let the
-                # caller decide whether to wait or kill.
-                return self._busy_result(state)
+            lock = self._locks.setdefault(session_id, asyncio.Lock())
+            async with lock:
+                state = self._sessions.get(session_id)
+                if state is not None and state.log_id is not None:
+                    # Session is mid-command — refuse with `busy` and let the
+                    # caller decide whether to wait or kill.
+                    return self._busy_result(state)
 
-            if state is None:
-                state = await self._create_session(conn, session_id, host, name)
-                self._sessions[session_id] = state
+                if state is None:
+                    state = await self._create_session(conn, session_id, host, name)
+                    self._sessions[session_id] = state
 
-            log_id = str(ULID())
-            log_path = f"{conn.home_dir}/.tai-ssh/logs/{log_id}.log"
-            state.log_id = log_id
-            state.log_path = log_path
-            state.command = command
-            state.reason = reason
-            state.started_at = self._now()
-            state.last_used_at = state.started_at
+                log_id = str(ULID())
+                log_path = f"{conn.home_dir}/.tai-ssh/logs/{log_id}.log"
+                state.log_id = log_id
+                state.log_path = log_path
+                state.command = command
+                state.reason = reason
+                state.started_at = self._now()
+                state.last_used_at = state.started_at
 
-            await self._send_command(conn, name, log_id, log_path, command)
+                await self._send_command(conn, name, log_id, log_path, command)
 
-        return await self._poll(conn, state, timeout, tool="session_run")
+            return await self._poll(conn, state, timeout, tool="session_run")
+        except HostUnreachable:
+            # tmux server died with the host; local state is meaningless.
+            self._forget(session_id)
+            raise
 
     async def wait(self, session_id: str, *, timeout: float = 30.0) -> RunResult:
         host, _ = parse_session_id(session_id)
-        conn = await self._pool.get(host)
+        try:
+            conn = await self._pool.get(host)
 
-        state = self._sessions.get(session_id)
-        if state is None or state.log_id is None:
-            return self._idle_result(session_id)
+            state = self._sessions.get(session_id)
+            if state is None or state.log_id is None:
+                return self._idle_result(session_id)
 
-        return await self._poll(conn, state, timeout, tool="session_wait")
+            return await self._poll(conn, state, timeout, tool="session_wait")
+        except HostUnreachable:
+            self._forget(session_id)
+            raise
 
     async def kill(self, session_id: str) -> dict[str, bool]:
-        host, name = parse_session_id(session_id)
-        conn = await self._pool.get(host)
+        """Tear down the tmux session and drop local bookkeeping.
 
-        result = await conn.run(f"tmux kill-session -t {_TMUX_PREFIX}/{name}", check=False)
-        killed = result.exit_status == 0
-        self._sessions.pop(session_id, None)
-        self._locks.pop(session_id, None)
+        Local cleanup is unconditional: even if the remote host is unreachable
+        (and the tmux server is therefore already gone), we still clear the
+        registry entry so subsequent calls don't see a ghost ``busy`` session.
+        """
+        host, name = parse_session_id(session_id)
+        killed = False
+        try:
+            conn = await self._pool.get(host)
+            result = await conn.run(f"tmux kill-session -t {_TMUX_PREFIX}/{name}", check=False)
+            killed = result.exit_status == 0
+        except HostUnreachable:
+            # Remote tmux is already dead by definition; nothing to kill.
+            pass
+        self._forget(session_id)
         await self._audit.record("session_kill", host=host, session=session_id, killed=killed)
         return {"killed": killed}
+
+    def _forget(self, session_id: str) -> None:
+        """Drop local session bookkeeping. The per-session lock stays put:
+        popping it while a waiter holds a reference would let a follow-up
+        call create a fresh lock and run concurrently with the waiter."""
+        self._sessions.pop(session_id, None)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return [
@@ -227,7 +271,19 @@ class SessionManager:
         # the actual `echo` output: the start marker line is the bare string
         # `__TAI_START__<id>__` whereas the echoed command line begins with
         # the prompt and includes `echo __TAI_START__<id>__; ...`.
-        wrapped = f"echo __TAI_START__{log_id}__; {command}; echo __TAI_DONE__$?__{log_id}__"
+        #
+        # `eval` defers parsing of the user command to runtime in the
+        # *current* shell. That preserves shell state (cd, source,
+        # export, function/alias defs) across runs — the whole point of
+        # tmux-backed sessions — while still keeping the outer line
+        # well-formed if the user command has a parse error. A failed
+        # eval returns non-zero, so DONE still fires and `$?` carries
+        # the real exit (or eval's syntax-error code).
+        wrapped = (
+            f"echo __TAI_START__{log_id}__; "
+            f"eval {shlex.quote(command)}; "
+            f"echo __TAI_DONE__$?__{log_id}__"
+        )
 
         # Reset pipe-pane then redirect to the new per-command log file.
         # Two `pipe-pane` invocations chained by `;` is one ssh round trip.
@@ -257,15 +313,21 @@ class SessionManager:
         assert state.log_id is not None
         assert state.log_path is not None
         log_id = state.log_id
-        log_path = state.log_path
         done_re = re.compile(rf"^__TAI_DONE__(\d+)__{re.escape(log_id)}__\s*$", re.MULTILINE)
 
         call_start = self._now()
+        # Marker is ~30 chars; 64 bytes of overlap is plenty to catch one
+        # that straddles two appended chunks without re-scanning the buffer.
+        _OVERLAP = 64
         while True:
-            content = await self._read_log(conn, log_path)
+            content = await self._read_log(conn, state)
 
             # 1. Completion sentinel — the only "done" signal we trust.
-            m = done_re.search(content)
+            # Scan only what's new since the last poll (with a small overlap)
+            # so a 10 MB noisy build doesn't go quadratic on re-scans.
+            scan_from = max(0, state.scan_pos - _OVERLAP)
+            m = done_re.search(content, scan_from)
+            state.scan_pos = len(content)
             if m:
                 exit_code = int(m.group(1))
                 output = _extract_output(content, log_id)
@@ -299,11 +361,25 @@ class SessionManager:
 
             await asyncio.sleep(self._poll_interval)
 
-    async def _read_log(self, conn: Connection, log_path: str) -> str:
-        result = await conn.run(f"cat {shlex.quote(log_path)}", check=False)
+    async def _read_log(self, conn: Connection, state: _SessionState) -> str:
+        """Read only the bytes appended since the last poll, returning the full buffer.
+
+        Avoids re-shipping the entire log file on every poll: a noisy 10 MB
+        build polled every 200ms would otherwise transfer gigabytes total.
+        Uses ``tail -c +<offset+1>`` (1-indexed) so a fresh file with
+        offset 0 fetches the whole file on the first poll.
+        """
+        assert state.log_path is not None
+        cmd = f"tail -c +{state.log_offset + 1} {shlex.quote(state.log_path)}"
+        result = await conn.run(cmd, check=False)
         if result.exit_status != 0:
-            return ""
-        return _as_str(result.stdout)
+            # File may not exist yet; return whatever we've buffered so far.
+            return state.log_buffer
+        chunk = _as_str(result.stdout)
+        if chunk:
+            state.log_buffer += chunk
+            state.log_offset += len(chunk.encode("utf-8"))
+        return state.log_buffer
 
     def _attach_hint(self, state: _SessionState) -> str:
         return f"ssh {state.host} -t tmux attach -t {_TMUX_PREFIX}/{state.name}"
@@ -368,6 +444,9 @@ class SessionManager:
         state.reason = None
         state.started_at = None
         state.last_used_at = self._now()
+        state.log_offset = 0
+        state.log_buffer = ""
+        state.scan_pos = 0
 
     async def _audit_event(self, state: _SessionState, result: RunResult, *, tool: str) -> None:
         duration_ms: int | None = None

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,7 +20,7 @@ from typing import Any
 import pytest
 
 from tai_mcp_ssh.audit import AuditLog
-from tai_mcp_ssh.errors import HostNotAllowed
+from tai_mcp_ssh.errors import HostNotAllowed, HostUnreachable
 from tai_mcp_ssh.sessions import (
     SessionManager,
     _detect_prompt,
@@ -146,6 +147,17 @@ def test_parse_session_id_rejects_empty_parts() -> None:
         parse_session_id("pi/")
 
 
+def test_parse_session_id_rejects_unsafe_name() -> None:
+    # Shell metacharacters in the name part would be interpolated into
+    # remote tmux commands. Reject at the boundary.
+    with pytest.raises(ValueError, match="shell metacharacters"):
+        parse_session_id("pi/foo;touch")
+    with pytest.raises(ValueError, match="shell metacharacters"):
+        parse_session_id("pi/$(whoami)")
+    with pytest.raises(ValueError, match="shell metacharacters"):
+        parse_session_id("pi/with space")
+
+
 def test_extract_output_strips_markers_and_prompt() -> None:
     content = _make_log("01J", output="hello\nworld")
     assert _extract_output(content, "01J") == "hello\nworld"
@@ -241,7 +253,7 @@ async def test_run_done_returns_full_output(tmp_path: Path) -> None:
         captured_log_id["id"] = log_id
         return FakeProc(0, _make_log(log_id, output="hello\nworld"), "")
 
-    fc.add_handler(r"^cat ", cat_handler)
+    fc.add_handler(r"^tail -c ", cat_handler)
 
     result = await sm.run("pi/default", "echo hello && echo world")
     assert result.status == "done"
@@ -257,7 +269,7 @@ async def test_run_done_returns_full_output(tmp_path: Path) -> None:
 async def test_run_creates_tmux_session_idempotently(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -278,10 +290,81 @@ async def test_run_creates_tmux_session_idempotently(tmp_path: Path) -> None:
     audit.close()
 
 
+async def test_run_wraps_user_command_in_eval(tmp_path: Path) -> None:
+    # Regression for #4 (parse-error sentinel survival) and for the
+    # `bash -c` regression caught in PR review: deferring the user
+    # command via `eval` keeps a parse error from stripping the outer
+    # DONE echo AND preserves shell state (cd/source/export/aliases)
+    # across runs, since eval runs in the current shell — unlike
+    # `bash -c`, which would fork a child.
+    fc = FakeConnection("pi")
+    fc.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="",
+            ),
+            "",
+        ),
+    )
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "echo (oops)")
+    send_keys = next(c for c in fc.run_calls if "tmux send-keys" in c and " -l " in c)
+    # Recover the literal typed into the pane (the arg after `-l`).
+    args = shlex.split(send_keys)
+    typed = args[args.index("-l") + 1]
+    # Outer sentinels survive a parse error in the user command.
+    assert "echo __TAI_START__" in typed
+    assert "echo __TAI_DONE__$?__" in typed
+    # User command goes through eval (current shell — state persists).
+    # No child-shell wrapper anywhere.
+    assert "eval 'echo (oops)'" in typed
+    assert "bash -c" not in typed
+    audit.close()
+
+
+async def test_run_preserves_shell_state_via_eval(tmp_path: Path) -> None:
+    # `cd /tmp` followed by `pwd` is the canonical test: with a
+    # child-shell wrapper the `cd` wouldn't affect the parent and `pwd`
+    # would show $HOME instead of /tmp. We can't run a real shell here,
+    # so the assertion is structural: both commands go through `eval`
+    # in the current shell, with no subshell or `bash -c` wrapping.
+    fc = FakeConnection("pi")
+    fc.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="",
+            ),
+            "",
+        ),
+    )
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "cd /tmp")
+    await sm.run("pi/default", "pwd")
+
+    sends = [c for c in fc.run_calls if "tmux send-keys" in c and " -l " in c]
+    assert len(sends) == 2
+    for send_keys in sends:
+        typed = shlex.split(send_keys)[shlex.split(send_keys).index("-l") + 1]
+        assert "eval " in typed
+        assert "bash -c" not in typed
+        assert "( " not in typed and "(set " not in typed  # no subshell wrap
+    audit.close()
+
+
 async def test_run_does_not_recreate_session(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -304,7 +387,7 @@ async def test_run_does_not_recreate_session(tmp_path: Path) -> None:
 async def test_run_returns_busy_when_session_locked(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     # cat returns NO completion — keep the first run polling.
-    fc.add_handler(r"^cat ", lambda _cmd: FakeProc(0, "", ""))
+    fc.add_handler(r"^tail -c ", lambda _cmd: FakeProc(0, "", ""))
 
     audit = AuditLog(root=tmp_path)
     sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.05)  # type: ignore[arg-type]
@@ -326,7 +409,7 @@ async def test_run_returns_busy_when_session_locked(tmp_path: Path) -> None:
 async def test_run_returns_needs_password_on_sudo_prompt(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             "starting...\n[sudo] password for pi: ",
@@ -347,7 +430,7 @@ async def test_run_returns_needs_password_on_sudo_prompt(tmp_path: Path) -> None
 async def test_run_times_out_returns_still_running(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     # Empty log; no sentinel, no prompt. Manager must hit timeout.
-    fc.add_handler(r"^cat ", lambda _cmd: FakeProc(0, "", ""))
+    fc.add_handler(r"^tail -c ", lambda _cmd: FakeProc(0, "", ""))
 
     audit = AuditLog(root=tmp_path)
     sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.05)  # type: ignore[arg-type]
@@ -375,7 +458,7 @@ async def test_wait_resumes_after_sudo_handoff(tmp_path: Path) -> None:
 
     # Phase 1: cat returns a sudo-prompt log.
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda _cmd: FakeProc(0, "starting...\n[sudo] password for pi: ", ""),
     )
     r1 = await sm.run("pi/default", "sudo whoami")
@@ -385,7 +468,7 @@ async def test_wait_resumes_after_sudo_handoff(tmp_path: Path) -> None:
     # Phase 2: replace handler with a completed log.
     fc.handlers.clear()
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda _cmd: FakeProc(0, _make_log(log_id, output="root", exit_code=0), ""),
     )
     r2 = await sm.wait("pi/default")
@@ -398,7 +481,7 @@ async def test_wait_resumes_after_sudo_handoff(tmp_path: Path) -> None:
 async def test_kill_terminates_session_and_clears_state(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -426,7 +509,7 @@ async def test_kill_terminates_session_and_clears_state(tmp_path: Path) -> None:
 async def test_list_sessions_shape(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -451,10 +534,38 @@ async def test_list_sessions_shape(tmp_path: Path) -> None:
     audit.close()
 
 
+async def test_poll_uses_incremental_tail_not_full_cat(tmp_path: Path) -> None:
+    # Each poll must fetch only bytes after state.log_offset via
+    # `tail -c +<offset+1>`, never re-shipping the whole file.
+    fc = FakeConnection("pi")
+    captured_cmds: list[str] = []
+
+    def handler(cmd: str) -> FakeProc:
+        captured_cmds.append(cmd)
+        m = re.search(r"/logs/([0-9A-Z]+)\.log", cmd)
+        if not m:
+            return FakeProc(0, "", "")
+        return FakeProc(0, _make_log(m.group(1), output="ok"), "")
+
+    fc.add_handler(r"^tail -c ", handler)
+
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "echo ok")
+    log_reads = [c for c in captured_cmds if c.startswith("tail -c ")]
+    assert log_reads, "expected at least one tail -c read"
+    # First read starts from byte 1 (whole file from offset 0).
+    assert log_reads[0].startswith("tail -c +1 ")
+    # `cat <path>` must never appear — that's the regression we're guarding.
+    assert not any(c.startswith("cat ") for c in captured_cmds)
+    audit.close()
+
+
 async def test_audit_records_session_run_with_reason(tmp_path: Path) -> None:
     fc = FakeConnection("pi")
     fc.add_handler(
-        r"^cat ",
+        r"^tail -c ",
         lambda cmd: FakeProc(
             0,
             _make_log(
@@ -477,4 +588,117 @@ async def test_audit_records_session_run_with_reason(tmp_path: Path) -> None:
     assert last["reason"] == "check kernel"
     assert last["status"] == "done"
     assert last["exit"] == 0
+    audit.close()
+
+
+# ---------------------------------------------------------------------------
+# Host-unreachable recovery (peer-reboot bug)
+# ---------------------------------------------------------------------------
+
+
+class FlakyPool:
+    """Pool that returns a healthy conn, then raises HostUnreachable, then heals."""
+
+    def __init__(self, healthy: FakeConnection, fail_until: int) -> None:
+        self._conn = healthy
+        self._fail_until = fail_until
+        self.calls = 0
+
+    async def get(self, alias: str) -> FakeConnection:
+        self.calls += 1
+        if self.calls <= self._fail_until:
+            raise HostUnreachable(f"{alias}: peer rebooted")
+        return self._conn
+
+
+async def test_run_clears_local_state_on_host_unreachable(tmp_path: Path) -> None:
+    """If the host vanishes mid-run, the registry must not keep a ghost busy entry."""
+    healthy = FakeConnection("pi")
+    healthy.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="ok",
+            ),
+            "",
+        ),
+    )
+    pool = FlakyPool(healthy, fail_until=0)  # start healthy
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(pool, audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    # First call registers the session locally.
+    await sm.run("pi/default", "ok")
+    assert sm.list_sessions(), "session should be registered after first run"
+
+    # Now the host goes away.
+    pool._fail_until = 99  # type: ignore[attr-defined]
+    with pytest.raises(HostUnreachable):
+        await sm.run("pi/default", "next")
+
+    # The registry must be cleared so subsequent calls aren't stuck on a ghost.
+    assert sm.list_sessions() == []
+    audit.close()
+
+
+async def test_kill_succeeds_when_host_unreachable(tmp_path: Path) -> None:
+    """session_kill must always clean up local state, even with a dead host."""
+    healthy = FakeConnection("pi")
+    healthy.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="ok",
+            ),
+            "",
+        ),
+    )
+    pool = FlakyPool(healthy, fail_until=0)
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(pool, audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "ok")
+    assert sm.list_sessions()
+
+    # Host drops out before we kill.
+    pool._fail_until = 99  # type: ignore[attr-defined]
+    result = await sm.kill("pi/default")
+
+    assert result == {"killed": False}
+    assert sm.list_sessions() == []  # local state cleared regardless
+
+    records = _audit_records(tmp_path, "pi")
+    kills = [r for r in records if r["tool"] == "session_kill"]
+    assert kills and kills[-1]["killed"] is False
+    audit.close()
+
+
+async def test_wait_clears_local_state_on_host_unreachable(tmp_path: Path) -> None:
+    """session_wait must also surface HostUnreachable and forget the ghost session."""
+    healthy = FakeConnection("pi")
+    pool = FlakyPool(healthy, fail_until=99)  # host already gone
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(pool, audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    # Pre-seed a fake registered session so wait() has something to clean up.
+    from tai_mcp_ssh.sessions import _SessionState  # local import keeps test isolated
+
+    now = datetime.now(UTC)
+    sm._sessions["pi/default"] = _SessionState(  # type: ignore[attr-defined]
+        session_id="pi/default",
+        host="pi",
+        name="default",
+        created_at=now,
+        last_used_at=now,
+        log_id="01J",
+        log_path="/home/pi/.tai-ssh/logs/01J.log",
+    )
+
+    with pytest.raises(HostUnreachable):
+        await sm.wait("pi/default")
+    assert sm.list_sessions() == []
     audit.close()

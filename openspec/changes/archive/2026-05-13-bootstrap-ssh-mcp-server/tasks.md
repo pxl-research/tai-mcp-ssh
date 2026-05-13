@@ -97,7 +97,7 @@
 
 ## 10. End-to-end smoke
 
-- [ ] 10.1 Manual test against a real Raspberry Pi or VM: full flow from `hosts add` to `session_run` to a sudo handoff and back
-- [ ] 10.2 Manual test of `put` + `sudo mv` stage-and-move
-- [ ] 10.3 Manual test of long-running command + `session_wait` resume
-- [ ] 10.4 Verify audit log contents reflect each step accurately, no secrets present
+- [x] 10.1 Manual test against a real Raspberry Pi or VM: full flow from `hosts add` to `session_run` to a sudo handoff and back
+- [x] 10.2 Manual test of `put` + `sudo mv` stage-and-move
+- [x] 10.3 Manual test of long-running command + `session_wait` resume
+- [x] 10.4 Verify audit log contents reflect each step accurately, no secrets present

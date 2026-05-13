@@ -121,17 +121,22 @@ def delete_host(alias: str, path: Path | None = None) -> None:
 
 
 def _reject_forbidden_keys(node: Any, where: str, path: str = "") -> None:
-    if not isinstance(node, dict):
-        return
-    for k, v in node.items():
-        if k in FORBIDDEN_KEYS:
-            qualified = f"{path}.{k}" if path else k
-            raise ConfigError(
-                f"{where}: forbidden key '{qualified}' — secrets must live in the OS "
-                f"keychain, referenced by `password_ref = "
-                f'"keychain://tai-mcp-ssh/<alias>"`.'
-            )
-        _reject_forbidden_keys(v, where, f"{path}.{k}" if path else k)
+    # Walk dicts and arrays-of-tables alike: TOML allows nesting tables
+    # inside lists (`[[hosts.foo.creds]]`), so the rejection has to chase
+    # both shapes to honour "at any depth".
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in FORBIDDEN_KEYS:
+                qualified = f"{path}.{k}" if path else k
+                raise ConfigError(
+                    f"{where}: forbidden key '{qualified}' — secrets must live in the OS "
+                    f"keychain, referenced by `password_ref = "
+                    f'"keychain://tai-mcp-ssh/<alias>"`.'
+                )
+            _reject_forbidden_keys(v, where, f"{path}.{k}" if path else k)
+    elif isinstance(node, list | tuple):
+        for i, item in enumerate(node):
+            _reject_forbidden_keys(item, where, f"{path}[{i}]")
 
 
 def _entry_to_host(alias: str, entry: dict[str, Any], where: str) -> Host:
