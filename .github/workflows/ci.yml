@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Pin Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies (frozen)
+        run: uv sync --frozen
+
+      - name: Run pre-commit (ruff, ruff-format, mypy, hygiene)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      - name: Run tests
+        run: uv run pytest
