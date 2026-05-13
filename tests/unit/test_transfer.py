@@ -13,10 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import asyncssh
 import pytest
 
 from tai_mcp_ssh.audit import AuditLog
-from tai_mcp_ssh.errors import HostNotAllowed
+from tai_mcp_ssh.errors import HostNotAllowed, TransferDenied
 from tai_mcp_ssh.transfer import TransferManager
 
 # ---------------------------------------------------------------------------
@@ -173,6 +174,53 @@ async def test_get_with_default_local_path(tmp_path: Path, monkeypatch: pytest.M
     result = await tm.get("pi", "/etc/hostname")
     assert Path(result.local_path) == tmp_path / "downloads" / "pi" / "hostname"
     assert Path(result.local_path).read_bytes() == payload
+    audit.close()
+
+
+class _DenyingSFTPClient:
+    """SFTPClient stand-in that raises SFTPError on open()."""
+
+    async def __aenter__(self) -> _DenyingSFTPClient:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+    def open(self, _path: str, _mode: str) -> FakeSFTPFile:
+        # asyncssh.SFTPError signals an SFTP-layer failure; for permission
+        # errors the server typically returns SSH_FX_PERMISSION_DENIED.
+        raise asyncssh.SFTPError(3, "Permission denied")
+
+
+class _DenyingConnection:
+    async def start_sftp(self) -> _DenyingSFTPClient:
+        return _DenyingSFTPClient()
+
+
+async def test_put_permission_denied_raises_transfer_denied(tmp_path: Path) -> None:
+    pool = FakePool({"pi": _DenyingConnection()})  # type: ignore[dict-item]
+    audit = AuditLog(root=tmp_path)
+    tm = TransferManager(pool, audit)  # type: ignore[arg-type]
+    local = tmp_path / "x"
+    local.write_text("y")
+    with pytest.raises(TransferDenied, match="stage-and-move"):
+        await tm.put("pi", local, "/etc/nginx/nginx.conf")
+    # The rejected attempt is still audited.
+    records = _audit_records(tmp_path, "pi")
+    rej = [r for r in records if r["tool"] == "put" and r["status"] == "rejected"]
+    assert rej
+    audit.close()
+
+
+async def test_get_permission_denied_raises_transfer_denied(tmp_path: Path) -> None:
+    pool = FakePool({"pi": _DenyingConnection()})  # type: ignore[dict-item]
+    audit = AuditLog(root=tmp_path)
+    tm = TransferManager(pool, audit)  # type: ignore[arg-type]
+    with pytest.raises(TransferDenied, match="cannot read"):
+        await tm.get("pi", "/etc/shadow", tmp_path / "out")
+    records = _audit_records(tmp_path, "pi")
+    rej = [r for r in records if r["tool"] == "get" and r["status"] == "rejected"]
+    assert rej
     audit.close()
 
 

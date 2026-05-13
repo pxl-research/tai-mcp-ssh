@@ -13,11 +13,26 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import asyncssh
+
 from tai_mcp_ssh import paths
 from tai_mcp_ssh.audit import AuditLog
+from tai_mcp_ssh.errors import TransferDenied
 from tai_mcp_ssh.ssh import ConnectionPool
 
 _CHUNK_BYTES = 64 * 1024
+
+
+def _stage_and_move_hint(host: str, remote_path: str) -> str:
+    """One-line recipe shown when a `put` to a write-protected destination fails."""
+    name = Path(remote_path).name
+    staging = f"/tmp/{name}"
+    return (
+        f"the SSH user cannot write {host}:{remote_path}. "
+        f"Use stage-and-move: put('{host}', <local>, '{staging}') "
+        f"then session_run('{host}/default', "
+        f"'sudo mv {staging} {remote_path}')."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,17 +68,28 @@ class TransferManager:
         size = local.stat().st_size
 
         conn = await self._pool.get(host)
-        async with (
-            await conn.start_sftp() as sftp,
-            sftp.open(remote_path, "wb") as remote_f,
-        ):
-            with local.open("rb") as local_f:
-                while True:
-                    chunk = local_f.read(_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    await remote_f.write(chunk)
+        try:
+            async with (
+                await conn.start_sftp() as sftp,
+                sftp.open(remote_path, "wb") as remote_f,
+            ):
+                with local.open("rb") as local_f:
+                    while True:
+                        chunk = local_f.read(_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        await remote_f.write(chunk)
+        except asyncssh.SFTPError as exc:
+            await self._audit.record(
+                "put",
+                host=host,
+                local_path=str(local),
+                remote_path=remote_path,
+                status="rejected",
+                error=str(exc),
+            )
+            raise TransferDenied(_stage_and_move_hint(host, remote_path)) from exc
 
         sha = digest.hexdigest()
         await self._audit.record(
@@ -100,20 +126,36 @@ class TransferManager:
         size = 0
 
         conn = await self._pool.get(host)
-        async with (
-            await conn.start_sftp() as sftp,
-            sftp.open(remote_path, "rb") as remote_f,
-        ):
-            with dest.open("wb") as local_f:
-                while True:
-                    chunk = await remote_f.read(_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    # asyncssh returns str|bytes; SFTP binary mode yields bytes.
-                    data = chunk if isinstance(chunk, bytes) else chunk.encode()
-                    digest.update(data)
-                    local_f.write(data)
-                    size += len(data)
+        try:
+            async with (
+                await conn.start_sftp() as sftp,
+                sftp.open(remote_path, "rb") as remote_f,
+            ):
+                with dest.open("wb") as local_f:
+                    while True:
+                        chunk = await remote_f.read(_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        # asyncssh returns str|bytes; SFTP binary mode yields bytes.
+                        data = chunk if isinstance(chunk, bytes) else chunk.encode()
+                        digest.update(data)
+                        local_f.write(data)
+                        size += len(data)
+        except asyncssh.SFTPError as exc:
+            await self._audit.record(
+                "get",
+                host=host,
+                remote_path=remote_path,
+                local_path=str(dest),
+                status="rejected",
+                error=str(exc),
+            )
+            raise TransferDenied(
+                f"the SSH user cannot read {host}:{remote_path}. "
+                f"Either ensure read permissions or stage it via "
+                f"`session_run('{host}/default', 'sudo cat {remote_path} > /tmp/...')` "
+                f"first and `get` from /tmp."
+            ) from exc
 
         sha = digest.hexdigest()
         await self._audit.record(

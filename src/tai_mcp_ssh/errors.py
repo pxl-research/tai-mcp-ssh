@@ -33,3 +33,7 @@ class KeychainUnavailable(TaiMcpSshError):
 
 class SecretInCommand(TaiMcpSshError):
     """Command appears to contain a literal secret; refusing to forward it."""
+
+
+class TransferDenied(TaiMcpSshError):
+    """SFTP put/get failed because the SSH user lacks permission."""
