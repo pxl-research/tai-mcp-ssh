@@ -26,12 +26,23 @@ from tai_mcp_ssh.config import Host
 from tai_mcp_ssh.errors import (
     ConfigError,
     HostNotAllowed,
+    HostUnreachable,
     KeychainUnavailable,
     TmuxMissing,
 )
 
 _KEYCHAIN_PREFIX = "keychain://"
 _REMOTE_LOG_DIR = "~/.tai-ssh/logs"
+
+# Exceptions that indicate the SSH transport is gone (peer reboot, network
+# drop, sshd kill). Caught at the Connection boundary so the pool can evict.
+_DEAD_CONN_ERRORS: tuple[type[BaseException], ...] = (
+    asyncssh.ConnectionLost,
+    asyncssh.DisconnectError,
+    asyncssh.ChannelOpenError,
+    OSError,
+    EOFError,
+)
 
 
 def _as_str(value: bytes | str | None) -> str:
@@ -66,6 +77,7 @@ class Connection:
         self._audit = audit
         self._tmux_path: str | None = None
         self._home_dir: str | None = None
+        self._dead = False
 
     @property
     def alias(self) -> str:
@@ -80,6 +92,11 @@ class Connection:
         return self._tmux_path
 
     @property
+    def dead(self) -> bool:
+        """True once a transport-dead error was observed on this connection."""
+        return self._dead
+
+    @property
     def home_dir(self) -> str:
         """Absolute path of the remote user's home dir. Set during _ensure_ready."""
         if self._home_dir is None:
@@ -88,10 +105,22 @@ class Connection:
 
     async def run(self, command: str, *, check: bool = False) -> asyncssh.SSHCompletedProcess:
         """Execute a one-shot command. Use sessions.py for stateful operations."""
-        return await self._conn.run(command, check=check)
+        if self._dead:
+            raise HostUnreachable(f"{self.alias}: connection already dead")
+        try:
+            return await self._conn.run(command, check=check)
+        except _DEAD_CONN_ERRORS as exc:
+            self._dead = True
+            raise HostUnreachable(f"{self.alias}: {exc}") from exc
 
     async def start_sftp(self) -> asyncssh.SFTPClient:
-        return await self._conn.start_sftp_client()
+        if self._dead:
+            raise HostUnreachable(f"{self.alias}: connection already dead")
+        try:
+            return await self._conn.start_sftp_client()
+        except _DEAD_CONN_ERRORS as exc:
+            self._dead = True
+            raise HostUnreachable(f"{self.alias}: {exc}") from exc
 
     async def close(self) -> None:
         self._conn.close()
@@ -124,18 +153,31 @@ class ConnectionPool:
         self._ready: set[str] = set()
 
     async def get(self, alias: str) -> Connection:
-        """Return an open, bootstrap-checked :class:`Connection` for ``alias``."""
+        """Return an open, bootstrap-checked :class:`Connection` for ``alias``.
+
+        Evicts and re-opens transparently if the cached connection was marked
+        dead by a previous transport error (peer reboot, network drop).
+        """
         if alias not in self._hosts:
             raise HostNotAllowed(alias)
 
         lock = self._locks.setdefault(alias, asyncio.Lock())
         async with lock:
             conn = self._connections.get(alias)
+            if conn is not None and conn.dead:
+                await self._evict(alias)
+                conn = None
             if conn is None:
                 conn = await self._open(alias)
                 self._connections[alias] = conn
             if alias not in self._ready:
-                await self._ensure_ready(conn)
+                try:
+                    await self._ensure_ready(conn)
+                except Exception:
+                    # Bootstrap failed (likely transport died mid-handshake);
+                    # don't leave a half-initialised conn in the cache.
+                    await self._evict(alias)
+                    raise
                 self._ready.add(alias)
             return conn
 
@@ -150,12 +192,23 @@ class ConnectionPool:
 
     # Internals -------------------------------------------------------------
 
+    async def _evict(self, alias: str) -> None:
+        """Drop a cached connection and its ready-state; best-effort close."""
+        conn = self._connections.pop(alias, None)
+        self._ready.discard(alias)
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                await conn.close()
+
     async def _open(self, alias: str) -> Connection:
         host = self._hosts[alias]
         kwargs = self._build_connect_kwargs(host)
         if host.auth == "password":
             kwargs["password"] = await self._resolve_password(host)
-        ssh_conn = await self._connect(**kwargs)
+        try:
+            ssh_conn = await self._connect(**kwargs)
+        except _DEAD_CONN_ERRORS as exc:
+            raise HostUnreachable(f"{alias}: {exc}") from exc
         # password (if any) goes out of scope here.
         return Connection(host, ssh_conn, self._audit)
 

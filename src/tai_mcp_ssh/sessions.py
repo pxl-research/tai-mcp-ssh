@@ -20,6 +20,7 @@ from typing import Any, Literal
 from ulid import ULID
 
 from tai_mcp_ssh.audit import AuditLog
+from tai_mcp_ssh.errors import HostUnreachable
 from tai_mcp_ssh.ssh import Connection, ConnectionPool, _as_str
 
 _TMUX_PREFIX = "tai-mcp"
@@ -132,53 +133,76 @@ class SessionManager:
         timeout: float = 30.0,
     ) -> RunResult:
         host, name = parse_session_id(session_id)
-        conn = await self._pool.get(host)
+        try:
+            conn = await self._pool.get(host)
 
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            state = self._sessions.get(session_id)
-            if state is not None and state.log_id is not None:
-                # Session is mid-command — refuse with `busy` and let the
-                # caller decide whether to wait or kill.
-                return self._busy_result(state)
+            lock = self._locks.setdefault(session_id, asyncio.Lock())
+            async with lock:
+                state = self._sessions.get(session_id)
+                if state is not None and state.log_id is not None:
+                    # Session is mid-command — refuse with `busy` and let the
+                    # caller decide whether to wait or kill.
+                    return self._busy_result(state)
 
-            if state is None:
-                state = await self._create_session(conn, session_id, host, name)
-                self._sessions[session_id] = state
+                if state is None:
+                    state = await self._create_session(conn, session_id, host, name)
+                    self._sessions[session_id] = state
 
-            log_id = str(ULID())
-            log_path = f"{conn.home_dir}/.tai-ssh/logs/{log_id}.log"
-            state.log_id = log_id
-            state.log_path = log_path
-            state.command = command
-            state.reason = reason
-            state.started_at = self._now()
-            state.last_used_at = state.started_at
+                log_id = str(ULID())
+                log_path = f"{conn.home_dir}/.tai-ssh/logs/{log_id}.log"
+                state.log_id = log_id
+                state.log_path = log_path
+                state.command = command
+                state.reason = reason
+                state.started_at = self._now()
+                state.last_used_at = state.started_at
 
-            await self._send_command(conn, name, log_id, log_path, command)
+                await self._send_command(conn, name, log_id, log_path, command)
 
-        return await self._poll(conn, state, timeout, tool="session_run")
+            return await self._poll(conn, state, timeout, tool="session_run")
+        except HostUnreachable:
+            # tmux server died with the host; local state is meaningless.
+            self._forget(session_id)
+            raise
 
     async def wait(self, session_id: str, *, timeout: float = 30.0) -> RunResult:
         host, _ = parse_session_id(session_id)
-        conn = await self._pool.get(host)
+        try:
+            conn = await self._pool.get(host)
 
-        state = self._sessions.get(session_id)
-        if state is None or state.log_id is None:
-            return self._idle_result(session_id)
+            state = self._sessions.get(session_id)
+            if state is None or state.log_id is None:
+                return self._idle_result(session_id)
 
-        return await self._poll(conn, state, timeout, tool="session_wait")
+            return await self._poll(conn, state, timeout, tool="session_wait")
+        except HostUnreachable:
+            self._forget(session_id)
+            raise
 
     async def kill(self, session_id: str) -> dict[str, bool]:
-        host, name = parse_session_id(session_id)
-        conn = await self._pool.get(host)
+        """Tear down the tmux session and drop local bookkeeping.
 
-        result = await conn.run(f"tmux kill-session -t {_TMUX_PREFIX}/{name}", check=False)
-        killed = result.exit_status == 0
-        self._sessions.pop(session_id, None)
-        self._locks.pop(session_id, None)
+        Local cleanup is unconditional: even if the remote host is unreachable
+        (and the tmux server is therefore already gone), we still clear the
+        registry entry so subsequent calls don't see a ghost ``busy`` session.
+        """
+        host, name = parse_session_id(session_id)
+        killed = False
+        try:
+            conn = await self._pool.get(host)
+            result = await conn.run(f"tmux kill-session -t {_TMUX_PREFIX}/{name}", check=False)
+            killed = result.exit_status == 0
+        except HostUnreachable:
+            # Remote tmux is already dead by definition; nothing to kill.
+            pass
+        self._forget(session_id)
         await self._audit.record("session_kill", host=host, session=session_id, killed=killed)
         return {"killed": killed}
+
+    def _forget(self, session_id: str) -> None:
+        """Drop local session bookkeeping (registry entry + per-session lock)."""
+        self._sessions.pop(session_id, None)
+        self._locks.pop(session_id, None)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return [

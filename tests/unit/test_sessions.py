@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from tai_mcp_ssh.audit import AuditLog
-from tai_mcp_ssh.errors import HostNotAllowed
+from tai_mcp_ssh.errors import HostNotAllowed, HostUnreachable
 from tai_mcp_ssh.sessions import (
     SessionManager,
     _detect_prompt,
@@ -505,4 +505,117 @@ async def test_audit_records_session_run_with_reason(tmp_path: Path) -> None:
     assert last["reason"] == "check kernel"
     assert last["status"] == "done"
     assert last["exit"] == 0
+    audit.close()
+
+
+# ---------------------------------------------------------------------------
+# Host-unreachable recovery (peer-reboot bug)
+# ---------------------------------------------------------------------------
+
+
+class FlakyPool:
+    """Pool that returns a healthy conn, then raises HostUnreachable, then heals."""
+
+    def __init__(self, healthy: FakeConnection, fail_until: int) -> None:
+        self._conn = healthy
+        self._fail_until = fail_until
+        self.calls = 0
+
+    async def get(self, alias: str) -> FakeConnection:
+        self.calls += 1
+        if self.calls <= self._fail_until:
+            raise HostUnreachable(f"{alias}: peer rebooted")
+        return self._conn
+
+
+async def test_run_clears_local_state_on_host_unreachable(tmp_path: Path) -> None:
+    """If the host vanishes mid-run, the registry must not keep a ghost busy entry."""
+    healthy = FakeConnection("pi")
+    healthy.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="ok",
+            ),
+            "",
+        ),
+    )
+    pool = FlakyPool(healthy, fail_until=0)  # start healthy
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(pool, audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    # First call registers the session locally.
+    await sm.run("pi/default", "ok")
+    assert sm.list_sessions(), "session should be registered after first run"
+
+    # Now the host goes away.
+    pool._fail_until = 99  # type: ignore[attr-defined]
+    with pytest.raises(HostUnreachable):
+        await sm.run("pi/default", "next")
+
+    # The registry must be cleared so subsequent calls aren't stuck on a ghost.
+    assert sm.list_sessions() == []
+    audit.close()
+
+
+async def test_kill_succeeds_when_host_unreachable(tmp_path: Path) -> None:
+    """session_kill must always clean up local state, even with a dead host."""
+    healthy = FakeConnection("pi")
+    healthy.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="ok",
+            ),
+            "",
+        ),
+    )
+    pool = FlakyPool(healthy, fail_until=0)
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(pool, audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "ok")
+    assert sm.list_sessions()
+
+    # Host drops out before we kill.
+    pool._fail_until = 99  # type: ignore[attr-defined]
+    result = await sm.kill("pi/default")
+
+    assert result == {"killed": False}
+    assert sm.list_sessions() == []  # local state cleared regardless
+
+    records = _audit_records(tmp_path, "pi")
+    kills = [r for r in records if r["tool"] == "session_kill"]
+    assert kills and kills[-1]["killed"] is False
+    audit.close()
+
+
+async def test_wait_clears_local_state_on_host_unreachable(tmp_path: Path) -> None:
+    """session_wait must also surface HostUnreachable and forget the ghost session."""
+    healthy = FakeConnection("pi")
+    pool = FlakyPool(healthy, fail_until=99)  # host already gone
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(pool, audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    # Pre-seed a fake registered session so wait() has something to clean up.
+    from tai_mcp_ssh.sessions import _SessionState  # local import keeps test isolated
+
+    now = datetime.now(UTC)
+    sm._sessions["pi/default"] = _SessionState(  # type: ignore[attr-defined]
+        session_id="pi/default",
+        host="pi",
+        name="default",
+        created_at=now,
+        last_used_at=now,
+        log_id="01J",
+        log_path="/home/pi/.tai-ssh/logs/01J.log",
+    )
+
+    with pytest.raises(HostUnreachable):
+        await sm.wait("pi/default")
+    assert sm.list_sessions() == []
     audit.close()

@@ -37,3 +37,11 @@ class SecretInCommand(TaiMcpSshError):
 
 class TransferDenied(TaiMcpSshError):
     """SFTP put/get failed because the SSH user lacks permission."""
+
+
+class HostUnreachable(TaiMcpSshError):
+    """SSH transport to the host is dead (peer rebooted, network gone, ...).
+
+    Raised after the pool has evicted the broken connection; a retry will
+    transparently reconnect.
+    """
