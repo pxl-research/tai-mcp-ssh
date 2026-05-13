@@ -98,6 +98,24 @@ host = "h"
         load_config(p)
 
 
+def test_load_rejects_forbidden_key_inside_array_of_tables(tmp_path: Path) -> None:
+    # `[[hosts.pi.creds]]` parses to a list of tables nested under hosts.pi;
+    # the walker must chase list values too, not only dicts.
+    p = tmp_path / "hosts.toml"
+    p.write_text(
+        """
+[hosts.pi]
+host = "h"
+
+[[hosts.pi.creds]]
+password = "leak"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="forbidden"):
+        load_config(p)
+
+
 def test_load_rejects_password_auth_without_ref(tmp_path: Path) -> None:
     p = tmp_path / "hosts.toml"
     p.write_text(
