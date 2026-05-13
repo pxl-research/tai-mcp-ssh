@@ -88,6 +88,10 @@ class _SessionState:
     # poll only fetches new bytes via `tail -c +<offset+1>`.
     log_offset: int = 0
     log_buffer: str = ""
+    # Highest buffer index we've already searched for the DONE sentinel.
+    # Next scan starts a small overlap behind this so a marker straddling
+    # two chunks still matches.
+    scan_pos: int = 0
 
 
 def parse_session_id(session_id: str) -> tuple[str, str]:
@@ -289,11 +293,18 @@ class SessionManager:
         done_re = re.compile(rf"^__TAI_DONE__(\d+)__{re.escape(log_id)}__\s*$", re.MULTILINE)
 
         call_start = self._now()
+        # Marker is ~30 chars; 64 bytes of overlap is plenty to catch one
+        # that straddles two appended chunks without re-scanning the buffer.
+        _OVERLAP = 64
         while True:
             content = await self._read_log(conn, state)
 
             # 1. Completion sentinel — the only "done" signal we trust.
-            m = done_re.search(content)
+            # Scan only what's new since the last poll (with a small overlap)
+            # so a 10 MB noisy build doesn't go quadratic on re-scans.
+            scan_from = max(0, state.scan_pos - _OVERLAP)
+            m = done_re.search(content, scan_from)
+            state.scan_pos = len(content)
             if m:
                 exit_code = int(m.group(1))
                 output = _extract_output(content, log_id)
@@ -412,6 +423,7 @@ class SessionManager:
         state.last_used_at = self._now()
         state.log_offset = 0
         state.log_buffer = ""
+        state.scan_pos = 0
 
     async def _audit_event(self, state: _SessionState, result: RunResult, *, tool: str) -> None:
         duration_ms: int | None = None

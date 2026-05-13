@@ -285,12 +285,16 @@ def build_server(services: Services) -> Server:
             )
             raise
         except TaiMcpSshError as exc:
-            await services.audit.record(
-                name,
-                host=_host_from_args(name, args),
-                status="error",
-                error=str(exc),
-            )
+            # Managers that need richer fields (e.g. TransferDenied with
+            # local/remote paths) audit at the point of failure and set
+            # `exc.audited = True` so we don't double-record here.
+            if not getattr(exc, "audited", False):
+                await services.audit.record(
+                    name,
+                    host=_host_from_args(name, args),
+                    status="error",
+                    error=str(exc),
+                )
             raise
         except Exception as exc:  # noqa: BLE001 — invariant: every call audited
             # Catches ValueError from parse_session_id / unknown-tool dispatch

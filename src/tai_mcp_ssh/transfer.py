@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,16 +23,22 @@ from tai_mcp_ssh.ssh import ConnectionPool
 
 _CHUNK_BYTES = 64 * 1024
 
+# asyncssh exposes SFTP status codes as integers on SFTPError.code.
+# 3 is FX_PERMISSION_DENIED per RFC draft-ietf-secsh-filexfer.
+_SFTP_PERMISSION_DENIED = 3
+
 
 def _stage_and_move_hint(host: str, remote_path: str) -> str:
     """One-line recipe shown when a `put` to a write-protected destination fails."""
     name = Path(remote_path).name
     staging = f"/tmp/{name}"
+    # shlex.quote on the shell paths; !r on the outer Python literals so
+    # Python chooses non-colliding quotes if either path contains '.
+    shell_cmd = f"sudo mv {shlex.quote(staging)} {shlex.quote(remote_path)}"
     return (
         f"the SSH user cannot write {host}:{remote_path}. "
-        f"Use stage-and-move: put('{host}', <local>, '{staging}') "
-        f"then session_run('{host}/default', "
-        f"'sudo mv {staging} {remote_path}')."
+        f"Use stage-and-move: put({host!r}, <local>, {staging!r}) "
+        f"then session_run({host + '/default'!r}, {shell_cmd!r})."
     )
 
 
@@ -81,6 +88,10 @@ class TransferManager:
                         digest.update(chunk)
                         await remote_f.write(chunk)
         except asyncssh.SFTPError as exc:
+            if exc.code != _SFTP_PERMISSION_DENIED:
+                # Not a permissions issue — let the server boundary audit it
+                # with status=error and surface the real cause to the caller.
+                raise
             await self._audit.record(
                 "put",
                 host=host,
@@ -89,7 +100,9 @@ class TransferManager:
                 status="rejected",
                 error=str(exc),
             )
-            raise TransferDenied(_stage_and_move_hint(host, remote_path)) from exc
+            denied = TransferDenied(_stage_and_move_hint(host, remote_path))
+            denied.audited = True  # type: ignore[attr-defined]
+            raise denied from exc
 
         sha = digest.hexdigest()
         await self._audit.record(
@@ -142,6 +155,8 @@ class TransferManager:
                         local_f.write(data)
                         size += len(data)
         except asyncssh.SFTPError as exc:
+            if exc.code != _SFTP_PERMISSION_DENIED:
+                raise
             await self._audit.record(
                 "get",
                 host=host,
@@ -150,12 +165,15 @@ class TransferManager:
                 status="rejected",
                 error=str(exc),
             )
-            raise TransferDenied(
+            shell_cmd = f"sudo cat {shlex.quote(remote_path)} > /tmp/..."
+            denied = TransferDenied(
                 f"the SSH user cannot read {host}:{remote_path}. "
                 f"Either ensure read permissions or stage it via "
-                f"`session_run('{host}/default', 'sudo cat {remote_path} > /tmp/...')` "
+                f"session_run({host + '/default'!r}, {shell_cmd!r}) "
                 f"first and `get` from /tmp."
-            ) from exc
+            )
+            denied.audited = True  # type: ignore[attr-defined]
+            raise denied from exc
 
         sha = digest.hexdigest()
         await self._audit.record(

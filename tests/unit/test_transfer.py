@@ -177,24 +177,34 @@ async def test_get_with_default_local_path(tmp_path: Path, monkeypatch: pytest.M
     audit.close()
 
 
-class _DenyingSFTPClient:
-    """SFTPClient stand-in that raises SFTPError on open()."""
+class _FailingSFTPClient:
+    """SFTPClient stand-in that raises a configurable SFTPError on open()."""
 
-    async def __aenter__(self) -> _DenyingSFTPClient:
+    def __init__(self, code: int, message: str) -> None:
+        self._code = code
+        self._message = message
+
+    async def __aenter__(self) -> _FailingSFTPClient:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
         return None
 
     def open(self, _path: str, _mode: str) -> FakeSFTPFile:
-        # asyncssh.SFTPError signals an SFTP-layer failure; for permission
-        # errors the server typically returns SSH_FX_PERMISSION_DENIED.
-        raise asyncssh.SFTPError(3, "Permission denied")
+        raise asyncssh.SFTPError(self._code, self._message)
 
 
-class _DenyingConnection:
-    async def start_sftp(self) -> _DenyingSFTPClient:
-        return _DenyingSFTPClient()
+class _FailingConnection:
+    def __init__(self, code: int = 3, message: str = "Permission denied") -> None:
+        self._code = code
+        self._message = message
+
+    async def start_sftp(self) -> _FailingSFTPClient:
+        return _FailingSFTPClient(self._code, self._message)
+
+
+# Back-compat aliases for the permission-denied tests below.
+_DenyingConnection = _FailingConnection
 
 
 async def test_put_permission_denied_raises_transfer_denied(tmp_path: Path) -> None:
@@ -203,12 +213,15 @@ async def test_put_permission_denied_raises_transfer_denied(tmp_path: Path) -> N
     tm = TransferManager(pool, audit)  # type: ignore[arg-type]
     local = tmp_path / "x"
     local.write_text("y")
-    with pytest.raises(TransferDenied, match="stage-and-move"):
+    with pytest.raises(TransferDenied, match="stage-and-move") as info:
         await tm.put("pi", local, "/etc/nginx/nginx.conf")
-    # The rejected attempt is still audited.
+    # The exception carries the `audited` marker so the server boundary
+    # skips a second audit record (single-audit invariant).
+    assert getattr(info.value, "audited", False) is True
+    # The rejected attempt is still audited exactly once.
     records = _audit_records(tmp_path, "pi")
     rej = [r for r in records if r["tool"] == "put" and r["status"] == "rejected"]
-    assert rej
+    assert len(rej) == 1
     audit.close()
 
 
@@ -216,11 +229,40 @@ async def test_get_permission_denied_raises_transfer_denied(tmp_path: Path) -> N
     pool = FakePool({"pi": _DenyingConnection()})  # type: ignore[dict-item]
     audit = AuditLog(root=tmp_path)
     tm = TransferManager(pool, audit)  # type: ignore[arg-type]
-    with pytest.raises(TransferDenied, match="cannot read"):
+    with pytest.raises(TransferDenied, match="cannot read") as info:
         await tm.get("pi", "/etc/shadow", tmp_path / "out")
+    assert getattr(info.value, "audited", False) is True
     records = _audit_records(tmp_path, "pi")
     rej = [r for r in records if r["tool"] == "get" and r["status"] == "rejected"]
-    assert rej
+    assert len(rej) == 1
+    audit.close()
+
+
+async def test_put_non_permission_sftp_error_propagates(tmp_path: Path) -> None:
+    # Disk full, missing parent, protocol error, etc. must NOT be mapped to
+    # TransferDenied (the stage-and-move hint would be wrong) and must NOT
+    # write a local "rejected" audit record — the server boundary records
+    # them at status=error instead.
+    pool = FakePool({"pi": _FailingConnection(code=4, message="Failure")})  # type: ignore[dict-item]
+    audit = AuditLog(root=tmp_path)
+    tm = TransferManager(pool, audit)  # type: ignore[arg-type]
+    local = tmp_path / "x"
+    local.write_text("y")
+    with pytest.raises(asyncssh.SFTPError):
+        await tm.put("pi", local, "/nope/dest")
+    records = _audit_records(tmp_path, "pi")
+    assert not [r for r in records if r["tool"] == "put"]
+    audit.close()
+
+
+async def test_get_non_permission_sftp_error_propagates(tmp_path: Path) -> None:
+    pool = FakePool({"pi": _FailingConnection(code=4, message="Failure")})  # type: ignore[dict-item]
+    audit = AuditLog(root=tmp_path)
+    tm = TransferManager(pool, audit)  # type: ignore[arg-type]
+    with pytest.raises(asyncssh.SFTPError):
+        await tm.get("pi", "/nope/file", tmp_path / "out")
+    records = _audit_records(tmp_path, "pi")
+    assert not [r for r in records if r["tool"] == "get"]
     audit.close()
 
 
