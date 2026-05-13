@@ -49,6 +49,11 @@ def hosts() -> None:
     pass
 
 
+def _stdin_is_tty() -> bool:
+    """Wrap ``sys.stdin.isatty`` so tests can substitute without fighting CliRunner."""
+    return sys.stdin.isatty()
+
+
 @hosts.command("add", help="Add a host interactively. Passwords prompted via getpass.")
 @click.argument("alias")
 @click.option(
@@ -79,7 +84,7 @@ def hosts_add(
     auth: str | None,
     identity_file: str | None,
 ) -> None:
-    if not sys.stdin.isatty():
+    if not _stdin_is_tty():
         raise click.ClickException(
             "hosts add must be run from an interactive terminal (secrets are captured via getpass)."
         )
@@ -100,6 +105,22 @@ def hosts_add(
         )
     if auth is None:
         auth = click.prompt("Auth", type=click.Choice(["key", "password"]), default="key")
+
+    if auth == "key" and identity_file is None:
+        # Cloud-provider VMs (AWS, GCP, Oracle, ...) routinely hand the user
+        # a specific .pem/.key file that isn't in the agent and isn't named
+        # in ssh_config. Surface the option here so the interactive flow
+        # works without hand-editing hosts.toml afterwards.
+        identity_file = (
+            click.prompt(
+                "Identity file (absolute path, leave blank to use ssh_config / agent)",
+                default="",
+                show_default=False,
+            )
+            or None
+        )
+        if identity_file is not None:
+            identity_file = str(Path(identity_file).expanduser().resolve())
 
     password_ref: str | None = None
     if auth == "password":

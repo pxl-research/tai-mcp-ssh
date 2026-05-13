@@ -279,10 +279,16 @@ class SessionManager:
         # well-formed if the user command has a parse error. A failed
         # eval returns non-zero, so DONE still fires and `$?` carries
         # the real exit (or eval's syntax-error code).
+        #
+        # `printf '\n…\n'` (instead of `echo`) forces a leading newline
+        # so the DONE marker always lands at start-of-line, even when
+        # the user command's last output lacks a trailing newline
+        # (`curl`, `printf` without `\n`, `echo -n`, …). The line-anchored
+        # done_re in _poll only matches a marker at column 0.
         wrapped = (
             f"echo __TAI_START__{log_id}__; "
             f"eval {shlex.quote(command)}; "
-            f"echo __TAI_DONE__$?__{log_id}__"
+            f"printf '\\n__TAI_DONE__%d__{log_id}__\\n' \"$?\""
         )
 
         # Reset pipe-pane then redirect to the new per-command log file.
