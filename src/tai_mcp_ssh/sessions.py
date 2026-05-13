@@ -25,6 +25,11 @@ from tai_mcp_ssh.ssh import Connection, ConnectionPool, _as_str
 
 _TMUX_PREFIX = "tai-mcp"
 
+# Session names are interpolated into remote shell commands; restrict to a
+# safe character set so a session_id like `pi/foo;touch /tmp/pwned` can't
+# inject. Hosts are already constrained by the allowlist at the call site.
+_SAFE_SESSION_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
 # Output-slice thresholds (per output-capture spec).
 _FULL_THRESHOLD_LINES = 50
 _FULL_THRESHOLD_BYTES = 4096
@@ -101,6 +106,11 @@ def parse_session_id(session_id: str) -> tuple[str, str]:
     host, _, name = session_id.partition("/")
     if not host or not name:
         raise ValueError(f"Invalid session_id {session_id!r}: host and name must both be non-empty")
+    if not _SAFE_SESSION_NAME.fullmatch(name):
+        raise ValueError(
+            f"Invalid session_id {session_id!r}: name must match [A-Za-z0-9._-]+ "
+            f"(no shell metacharacters)"
+        )
     return host, name
 
 
@@ -204,9 +214,10 @@ class SessionManager:
         return {"killed": killed}
 
     def _forget(self, session_id: str) -> None:
-        """Drop local session bookkeeping (registry entry + per-session lock)."""
+        """Drop local session bookkeeping. The per-session lock stays put:
+        popping it while a waiter holds a reference would let a follow-up
+        call create a fresh lock and run concurrently with the waiter."""
         self._sessions.pop(session_id, None)
-        self._locks.pop(session_id, None)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return [
@@ -261,15 +272,16 @@ class SessionManager:
         # `__TAI_START__<id>__` whereas the echoed command line begins with
         # the prompt and includes `echo __TAI_START__<id>__; ...`.
         #
-        # The user command runs in a child `bash -c` so its parse and
-        # runtime errors are isolated from the outer sentinel echoes —
-        # without this, a syntax error in {command} discards the whole
-        # line (DONE included) and _poll waits forever for a sentinel
-        # that will never arrive. `$?` propagates the child's exit so
-        # callers still see the real status.
+        # `eval` defers parsing of the user command to runtime in the
+        # *current* shell. That preserves shell state (cd, source,
+        # export, function/alias defs) across runs — the whole point of
+        # tmux-backed sessions — while still keeping the outer line
+        # well-formed if the user command has a parse error. A failed
+        # eval returns non-zero, so DONE still fires and `$?` carries
+        # the real exit (or eval's syntax-error code).
         wrapped = (
             f"echo __TAI_START__{log_id}__; "
-            f"bash -c {shlex.quote(command)}; "
+            f"eval {shlex.quote(command)}; "
             f"echo __TAI_DONE__$?__{log_id}__"
         )
 

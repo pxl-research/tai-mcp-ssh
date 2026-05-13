@@ -17,10 +17,10 @@ import pytest
 
 from tai_mcp_ssh.audit import AuditLog
 from tai_mcp_ssh.config import AuditSettings, Config, Host
-from tai_mcp_ssh.errors import HostNotAllowed
+from tai_mcp_ssh.errors import HostNotAllowed, TransferDenied
 from tai_mcp_ssh.server import (
     Services,
-    build_server,
+    _dispatch_and_audit,
     dispatch,
     to_jsonable,
     tool_specs,
@@ -191,27 +191,15 @@ async def test_dispatch_unknown_tool_raises(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_call_tool_audits_host_not_allowed(tmp_path: Path) -> None:
+async def test_dispatch_and_audit_records_host_not_allowed_as_rejected(tmp_path: Path) -> None:
+    # Exercises the actual production audit branch — no logic replay.
     svc = _make_services(tmp_path, hosts={})
     svc.sessions.run = AsyncMock(side_effect=HostNotAllowed("ghost"))
-    # build_server registers handlers we don't need to introspect here; we
-    # verify the audit-on-rejection contract by replaying the wrapper's
-    # logic directly against dispatch.
-    build_server(svc)  # ensures it constructs cleanly
-    from tai_mcp_ssh.server import _host_from_args  # type: ignore[attr-defined]
-
-    try:
-        await dispatch(
+    with pytest.raises(HostNotAllowed):
+        await _dispatch_and_audit(
             svc,
             "session_run",
             {"session_id": "ghost/default", "command": "ls"},
-        )
-    except HostNotAllowed as exc:
-        await svc.audit.record(
-            "session_run",
-            host=_host_from_args("session_run", {"session_id": "ghost/default"}),
-            status="rejected",
-            error=str(exc),
         )
     records = _audit_records(tmp_path, "ghost")
     assert records and records[0]["status"] == "rejected"
@@ -220,25 +208,45 @@ async def test_call_tool_audits_host_not_allowed(tmp_path: Path) -> None:
     svc.audit.close()
 
 
-async def test_call_tool_audits_unexpected_value_error(tmp_path: Path) -> None:
+async def test_dispatch_and_audit_records_unexpected_value_error(tmp_path: Path) -> None:
     # ValueError from dispatch (e.g. unknown tool) must still produce one
-    # audit record — invariant in the audit-log spec.
+    # audit record at status=error with a typed prefix.
     svc = _make_services(tmp_path)
-    build_server(svc)
-    from tai_mcp_ssh.server import _host_from_args  # type: ignore[attr-defined]
-
-    try:
-        await dispatch(svc, "no-such-tool", {})
-    except ValueError as exc:
-        await svc.audit.record(
-            "no-such-tool",
-            host=_host_from_args("no-such-tool", {}),
-            status="error",
-            error=f"{type(exc).__name__}: {exc}",
-        )
+    with pytest.raises(ValueError):
+        await _dispatch_and_audit(svc, "no-such-tool", {})
     records = _audit_records(tmp_path, "_system")
     assert records and records[0]["status"] == "error"
     assert records[0]["error"].startswith("ValueError")
+    svc.audit.close()
+
+
+async def test_dispatch_and_audit_skips_audit_when_marker_set(tmp_path: Path) -> None:
+    # Managers that record richer fields locally (e.g. TransferManager
+    # logging a rejected put with local/remote paths) set `exc.audited`
+    # so the server doesn't double-record.
+    svc = _make_services(tmp_path, hosts={"pi": Host(alias="pi")})
+    exc = TransferDenied("nope")
+    exc.audited = True  # type: ignore[attr-defined]
+    svc.transfer.put = AsyncMock(side_effect=exc)
+    with pytest.raises(TransferDenied):
+        await _dispatch_and_audit(
+            svc, "put", {"host": "pi", "local_path": "/x", "remote_path": "/y"}
+        )
+    records = _audit_records(tmp_path, "pi")
+    assert not records  # nothing recorded by the server — manager owned it
+    svc.audit.close()
+
+
+async def test_dispatch_and_audit_records_taimcpssh_error_without_marker(tmp_path: Path) -> None:
+    svc = _make_services(tmp_path, hosts={"pi": Host(alias="pi")})
+    svc.transfer.put = AsyncMock(side_effect=TransferDenied("no marker"))
+    with pytest.raises(TransferDenied):
+        await _dispatch_and_audit(
+            svc, "put", {"host": "pi", "local_path": "/x", "remote_path": "/y"}
+        )
+    records = _audit_records(tmp_path, "pi")
+    assert records and records[0]["status"] == "error"
+    assert records[0]["tool"] == "put"
     svc.audit.close()
 
 

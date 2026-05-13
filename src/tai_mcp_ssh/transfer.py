@@ -18,8 +18,8 @@ import asyncssh
 
 from tai_mcp_ssh import paths
 from tai_mcp_ssh.audit import AuditLog
-from tai_mcp_ssh.errors import TransferDenied
-from tai_mcp_ssh.ssh import ConnectionPool
+from tai_mcp_ssh.errors import HostUnreachable, TransferDenied
+from tai_mcp_ssh.ssh import DEAD_CONN_ERRORS, ConnectionPool
 
 _CHUNK_BYTES = 64 * 1024
 
@@ -97,12 +97,20 @@ class TransferManager:
                 host=host,
                 local_path=str(local),
                 remote_path=remote_path,
+                reason=reason,
                 status="rejected",
                 error=str(exc),
             )
             denied = TransferDenied(_stage_and_move_hint(host, remote_path))
             denied.audited = True  # type: ignore[attr-defined]
             raise denied from exc
+        except DEAD_CONN_ERRORS as exc:
+            # Transport died mid-write. start_sftp() is wrapped at the
+            # Connection boundary, but sftp.open / remote_f.write are not,
+            # so we mark the conn dead here so the pool evicts it on the
+            # next get() instead of handing back a corpse.
+            conn.mark_dead()
+            raise HostUnreachable(f"{host}: {exc}") from exc
 
         sha = digest.hexdigest()
         await self._audit.record(
@@ -162,6 +170,7 @@ class TransferManager:
                 host=host,
                 remote_path=remote_path,
                 local_path=str(dest),
+                reason=reason,
                 status="rejected",
                 error=str(exc),
             )
@@ -174,6 +183,9 @@ class TransferManager:
             )
             denied.audited = True  # type: ignore[attr-defined]
             raise denied from exc
+        except DEAD_CONN_ERRORS as exc:
+            conn.mark_dead()
+            raise HostUnreachable(f"{host}: {exc}") from exc
 
         sha = digest.hexdigest()
         await self._audit.record(

@@ -147,6 +147,17 @@ def test_parse_session_id_rejects_empty_parts() -> None:
         parse_session_id("pi/")
 
 
+def test_parse_session_id_rejects_unsafe_name() -> None:
+    # Shell metacharacters in the name part would be interpolated into
+    # remote tmux commands. Reject at the boundary.
+    with pytest.raises(ValueError, match="shell metacharacters"):
+        parse_session_id("pi/foo;touch")
+    with pytest.raises(ValueError, match="shell metacharacters"):
+        parse_session_id("pi/$(whoami)")
+    with pytest.raises(ValueError, match="shell metacharacters"):
+        parse_session_id("pi/with space")
+
+
 def test_extract_output_strips_markers_and_prompt() -> None:
     content = _make_log("01J", output="hello\nworld")
     assert _extract_output(content, "01J") == "hello\nworld"
@@ -279,12 +290,13 @@ async def test_run_creates_tmux_session_idempotently(tmp_path: Path) -> None:
     audit.close()
 
 
-async def test_run_wraps_user_command_in_bash_c(tmp_path: Path) -> None:
-    # Regression for #4: a bash parse error in the user command would
-    # otherwise discard the whole wrapped line, stripping the DONE
-    # sentinel and stranding the session. Wrapping in `bash -c <quoted>`
-    # isolates the parse error to the child shell so the outer DONE
-    # echo always runs.
+async def test_run_wraps_user_command_in_eval(tmp_path: Path) -> None:
+    # Regression for #4 (parse-error sentinel survival) and for the
+    # `bash -c` regression caught in PR review: deferring the user
+    # command via `eval` keeps a parse error from stripping the outer
+    # DONE echo AND preserves shell state (cd/source/export/aliases)
+    # across runs, since eval runs in the current shell — unlike
+    # `bash -c`, which would fork a child.
     fc = FakeConnection("pi")
     fc.add_handler(
         r"^tail -c ",
@@ -302,16 +314,50 @@ async def test_run_wraps_user_command_in_bash_c(tmp_path: Path) -> None:
 
     await sm.run("pi/default", "echo (oops)")
     send_keys = next(c for c in fc.run_calls if "tmux send-keys" in c and " -l " in c)
-    # Recover the literal typed into the pane (the arg after `-l`). The
-    # outer command quoting is shell-level; we want what bash will actually
-    # see after tmux types it.
+    # Recover the literal typed into the pane (the arg after `-l`).
     args = shlex.split(send_keys)
     typed = args[args.index("-l") + 1]
-    # Outer sentinels survive — they're siblings of the bash -c child.
+    # Outer sentinels survive a parse error in the user command.
     assert "echo __TAI_START__" in typed
     assert "echo __TAI_DONE__$?__" in typed
-    # User command runs in a child shell, shlex-quoted (single quotes around it).
-    assert "bash -c 'echo (oops)'" in typed
+    # User command goes through eval (current shell — state persists).
+    # No child-shell wrapper anywhere.
+    assert "eval 'echo (oops)'" in typed
+    assert "bash -c" not in typed
+    audit.close()
+
+
+async def test_run_preserves_shell_state_via_eval(tmp_path: Path) -> None:
+    # `cd /tmp` followed by `pwd` is the canonical test: with a
+    # child-shell wrapper the `cd` wouldn't affect the parent and `pwd`
+    # would show $HOME instead of /tmp. We can't run a real shell here,
+    # so the assertion is structural: both commands go through `eval`
+    # in the current shell, with no subshell or `bash -c` wrapping.
+    fc = FakeConnection("pi")
+    fc.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="",
+            ),
+            "",
+        ),
+    )
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "cd /tmp")
+    await sm.run("pi/default", "pwd")
+
+    sends = [c for c in fc.run_calls if "tmux send-keys" in c and " -l " in c]
+    assert len(sends) == 2
+    for send_keys in sends:
+        typed = shlex.split(send_keys)[shlex.split(send_keys).index("-l") + 1]
+        assert "eval " in typed
+        assert "bash -c" not in typed
+        assert "( " not in typed and "(set " not in typed  # no subshell wrap
     audit.close()
 
 

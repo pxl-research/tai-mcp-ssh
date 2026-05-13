@@ -35,8 +35,9 @@ _KEYCHAIN_PREFIX = "keychain://"
 _REMOTE_LOG_DIR = "~/.tai-ssh/logs"
 
 # Exceptions that indicate the SSH transport is gone (peer reboot, network
-# drop, sshd kill). Caught at the Connection boundary so the pool can evict.
-_DEAD_CONN_ERRORS: tuple[type[BaseException], ...] = (
+# drop, sshd kill). Caught at the Connection boundary (and by transfer.py
+# around SFTP write/read loops) so the pool can evict the dead conn.
+DEAD_CONN_ERRORS: tuple[type[BaseException], ...] = (
     asyncssh.ConnectionLost,
     asyncssh.DisconnectError,
     asyncssh.ChannelOpenError,
@@ -96,6 +97,10 @@ class Connection:
         """True once a transport-dead error was observed on this connection."""
         return self._dead
 
+    def mark_dead(self) -> None:
+        """Flag this connection as transport-dead so the pool evicts it on next get()."""
+        self._dead = True
+
     @property
     def home_dir(self) -> str:
         """Absolute path of the remote user's home dir. Set during _ensure_ready."""
@@ -109,7 +114,7 @@ class Connection:
             raise HostUnreachable(f"{self.alias}: connection already dead")
         try:
             return await self._conn.run(command, check=check)
-        except _DEAD_CONN_ERRORS as exc:
+        except DEAD_CONN_ERRORS as exc:
             self._dead = True
             raise HostUnreachable(f"{self.alias}: {exc}") from exc
 
@@ -118,7 +123,7 @@ class Connection:
             raise HostUnreachable(f"{self.alias}: connection already dead")
         try:
             return await self._conn.start_sftp_client()
-        except _DEAD_CONN_ERRORS as exc:
+        except DEAD_CONN_ERRORS as exc:
             self._dead = True
             raise HostUnreachable(f"{self.alias}: {exc}") from exc
 
@@ -207,7 +212,7 @@ class ConnectionPool:
             kwargs["password"] = await self._resolve_password(host)
         try:
             ssh_conn = await self._connect(**kwargs)
-        except _DEAD_CONN_ERRORS as exc:
+        except DEAD_CONN_ERRORS as exc:
             raise HostUnreachable(f"{alias}: {exc}") from exc
         # password (if any) goes out of scope here.
         return Connection(host, ssh_conn, self._audit)

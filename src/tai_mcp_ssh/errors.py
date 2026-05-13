@@ -40,8 +40,9 @@ class TransferDenied(TaiMcpSshError):
 
 
 class HostUnreachable(TaiMcpSshError):
-    """SSH transport to the host is dead (peer rebooted, network gone, ...).
+    """SSH transport to the host is observed to be dead.
 
-    Raised after the pool has evicted the broken connection; a retry will
-    transparently reconnect.
+    The cached connection is marked dead at the point this is raised; the
+    pool evicts it on the next ``get()`` call so a retry transparently
+    reconnects.
     """
