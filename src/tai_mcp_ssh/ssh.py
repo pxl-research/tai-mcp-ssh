@@ -218,8 +218,16 @@ class ConnectionPool:
         # Inline values from hosts.toml override the config when present.
         kwargs: dict[str, Any] = {
             "host": host.host or host.alias,
-            "config": [str(self._ssh_config)],
+            # Surface a dead transport within ~90s (3 × 30s) so the pool's
+            # eviction path runs instead of hanging on kernel TCP timeout.
+            "keepalive_interval": 30,
+            "keepalive_count_max": 3,
         }
+        # asyncssh raises FileNotFoundError if `config` points at a missing
+        # file. Treat a non-existent ssh_config as "no config" rather than
+        # a hard error so first-run / minimal setups work.
+        if self._ssh_config.is_file():
+            kwargs["config"] = [str(self._ssh_config)]
         if host.user is not None:
             kwargs["username"] = host.user
         if host.port != 22:

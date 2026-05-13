@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -275,6 +276,42 @@ async def test_run_creates_tmux_session_idempotently(tmp_path: Path) -> None:
     create_calls = [c for c in fc.run_calls if "tmux has-session" in c]
     assert len(create_calls) == 1
     assert "tmux new-session -d -s tai-mcp/default" in create_calls[0]
+    audit.close()
+
+
+async def test_run_wraps_user_command_in_bash_c(tmp_path: Path) -> None:
+    # Regression for #4: a bash parse error in the user command would
+    # otherwise discard the whole wrapped line, stripping the DONE
+    # sentinel and stranding the session. Wrapping in `bash -c <quoted>`
+    # isolates the parse error to the child shell so the outer DONE
+    # echo always runs.
+    fc = FakeConnection("pi")
+    fc.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="",
+            ),
+            "",
+        ),
+    )
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "echo (oops)")
+    send_keys = next(c for c in fc.run_calls if "tmux send-keys" in c and " -l " in c)
+    # Recover the literal typed into the pane (the arg after `-l`). The
+    # outer command quoting is shell-level; we want what bash will actually
+    # see after tmux types it.
+    args = shlex.split(send_keys)
+    typed = args[args.index("-l") + 1]
+    # Outer sentinels survive — they're siblings of the bash -c child.
+    assert "echo __TAI_START__" in typed
+    assert "echo __TAI_DONE__$?__" in typed
+    # User command runs in a child shell, shlex-quoted (single quotes around it).
+    assert "bash -c 'echo (oops)'" in typed
     audit.close()
 
 

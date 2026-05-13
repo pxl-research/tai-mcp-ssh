@@ -138,6 +138,8 @@ async def test_get_opens_and_caches(tmp_path: Path) -> None:
 async def test_key_auth_connect_kwargs(tmp_path: Path) -> None:
     audit = AuditLog(root=tmp_path)
     factory = FakeConnectFactory(run_handler=_default_handler)
+    ssh_config = tmp_path / "ssh_config"
+    ssh_config.touch()  # gated on existence by `_build_connect_kwargs`
     pool = ConnectionPool(
         hosts={
             "pi": Host(
@@ -151,7 +153,7 @@ async def test_key_auth_connect_kwargs(tmp_path: Path) -> None:
         },
         audit=audit,
         connect=factory,
-        ssh_config=tmp_path / "ssh_config",
+        ssh_config=ssh_config,
     )
     await pool.get("pi")
     kw = factory.connect_calls[0]
@@ -160,7 +162,44 @@ async def test_key_auth_connect_kwargs(tmp_path: Path) -> None:
     assert kw["port"] == 2222
     assert kw["client_keys"] == ["~/.ssh/pi_ed25519"]
     assert "password" not in kw
-    assert kw["config"] == [str(tmp_path / "ssh_config")]
+    assert kw["config"] == [str(ssh_config)]
+    await pool.close_all()
+    audit.close()
+
+
+async def test_keepalive_kwargs_sent_to_asyncssh(tmp_path: Path) -> None:
+    # Regression for #6: surface a dead transport within ~90s (3 × 30s)
+    # so the pool's eviction path runs instead of hanging on kernel TCP
+    # timeout.
+    audit = AuditLog(root=tmp_path)
+    factory = FakeConnectFactory(run_handler=_default_handler)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi")},
+        audit=audit,
+        connect=factory,
+    )
+    await pool.get("pi")
+    kw = factory.connect_calls[0]
+    assert kw["keepalive_interval"] == 30
+    assert kw["keepalive_count_max"] == 3
+    await pool.close_all()
+    audit.close()
+
+
+async def test_missing_ssh_config_is_tolerated(tmp_path: Path) -> None:
+    # Regression for #3: a non-existent ssh_config must not crash connect;
+    # we skip the kwarg and let asyncssh use its own defaults.
+    audit = AuditLog(root=tmp_path)
+    factory = FakeConnectFactory(run_handler=_default_handler)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi")},
+        audit=audit,
+        connect=factory,
+        ssh_config=tmp_path / "does-not-exist",
+    )
+    await pool.get("pi")
+    kw = factory.connect_calls[0]
+    assert "config" not in kw
     await pool.close_all()
     audit.close()
 

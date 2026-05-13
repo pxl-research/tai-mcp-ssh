@@ -260,7 +260,18 @@ class SessionManager:
         # the actual `echo` output: the start marker line is the bare string
         # `__TAI_START__<id>__` whereas the echoed command line begins with
         # the prompt and includes `echo __TAI_START__<id>__; ...`.
-        wrapped = f"echo __TAI_START__{log_id}__; {command}; echo __TAI_DONE__$?__{log_id}__"
+        #
+        # The user command runs in a child `bash -c` so its parse and
+        # runtime errors are isolated from the outer sentinel echoes —
+        # without this, a syntax error in {command} discards the whole
+        # line (DONE included) and _poll waits forever for a sentinel
+        # that will never arrive. `$?` propagates the child's exit so
+        # callers still see the real status.
+        wrapped = (
+            f"echo __TAI_START__{log_id}__; "
+            f"bash -c {shlex.quote(command)}; "
+            f"echo __TAI_DONE__$?__{log_id}__"
+        )
 
         # Reset pipe-pane then redirect to the new per-command log file.
         # Two `pipe-pane` invocations chained by `;` is one ssh round trip.
