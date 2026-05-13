@@ -509,3 +509,82 @@ async def test_close_all_closes_underlying_connections(tmp_path: Path) -> None:
     await pool.close_all()
     assert all(c.closed for c in factory.connections)
     audit.close()
+
+
+# ---------------------------------------------------------------------------
+# update_hosts — runtime reload primitive (issue #9)
+# ---------------------------------------------------------------------------
+
+
+async def test_update_hosts_evicts_removed_alias(tmp_path: Path) -> None:
+    audit = AuditLog(root=tmp_path)
+    factory = FakeConnectFactory(run_handler=_default_handler)
+    pool = ConnectionPool(
+        hosts={
+            "a": Host(alias="a", host="ha"),
+            "b": Host(alias="b", host="hb"),
+        },
+        audit=audit,
+        connect=factory,
+    )
+    await pool.get("a")
+    await pool.get("b")
+    await _flush_background_tasks()
+
+    # Drop alias "a" from the allowlist.
+    await pool.update_hosts({"b": Host(alias="b", host="hb")}, evict={"a"})
+
+    # "a"'s cached SSH conn was closed; "b"'s survived.
+    assert factory.connections[0].closed is True  # a
+    assert factory.connections[1].closed is False  # b
+    # "a" is no longer reachable.
+    with pytest.raises(HostNotAllowed):
+        await pool.get("a")
+    # "b" returns the same cached connection (no re-open).
+    same_b = await pool.get("b")
+    assert len(factory.connect_calls) == 2
+    assert same_b is not None
+    audit.close()
+
+
+async def test_update_hosts_no_eviction_keeps_connections(tmp_path: Path) -> None:
+    audit = AuditLog(root=tmp_path)
+    factory = FakeConnectFactory(run_handler=_default_handler)
+    pool = ConnectionPool(
+        hosts={"a": Host(alias="a", host="ha")},
+        audit=audit,
+        connect=factory,
+    )
+    await pool.get("a")
+
+    # Same allowlist, empty evict set — pure no-op for connections.
+    await pool.update_hosts({"a": Host(alias="a", host="ha")}, evict=set())
+    assert factory.connections[0].closed is False
+    # Cached conn is returned without re-opening.
+    await pool.get("a")
+    assert len(factory.connect_calls) == 1
+    audit.close()
+
+
+async def test_update_hosts_changed_params_evicts_and_reopens(tmp_path: Path) -> None:
+    # Changing connection params (e.g. host IP, port, identity_file) must
+    # evict the old conn so the next get() opens with the new params.
+    audit = AuditLog(root=tmp_path)
+    factory = FakeConnectFactory(run_handler=_default_handler)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi", host="192.168.1.42")},
+        audit=audit,
+        connect=factory,
+    )
+    await pool.get("pi")
+    await _flush_background_tasks()
+
+    new_pi = Host(alias="pi", host="10.0.0.5")  # IP changed
+    await pool.update_hosts({"pi": new_pi}, evict={"pi"})
+    assert factory.connections[0].closed is True
+
+    # Next get() reopens with the new params.
+    await pool.get("pi")
+    assert len(factory.connect_calls) == 2
+    assert factory.connect_calls[1]["host"] == "10.0.0.5"
+    audit.close()

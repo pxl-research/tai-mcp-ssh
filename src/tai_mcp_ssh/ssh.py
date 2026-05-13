@@ -195,6 +195,20 @@ class ConnectionPool:
         self._connections.clear()
         self._ready.clear()
 
+    async def update_hosts(self, new_hosts: dict[str, Host], evict: set[str]) -> None:
+        """Swap the in-memory allowlist and close cached connections for ``evict``.
+
+        Called from :meth:`Services.reload_hosts_from_disk` when the user edits
+        ``hosts.toml`` at runtime. The per-alias lock is acquired before each
+        eviction so a concurrent ``get(alias)`` doesn't race with the close
+        (matches the contract that ``_evict`` is always called under-lock).
+        """
+        self._hosts = new_hosts
+        for alias in evict:
+            lock = self._locks.setdefault(alias, asyncio.Lock())
+            async with lock:
+                await self._evict(alias)
+
     # Internals -------------------------------------------------------------
 
     async def _evict(self, alias: str) -> None:

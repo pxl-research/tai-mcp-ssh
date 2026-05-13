@@ -48,7 +48,10 @@ def tool_specs() -> list[mtypes.Tool]:
     return [
         mtypes.Tool(
             name="hosts",
-            description="List SSH hosts the LLM may reach. Returns alias, host, user, port, auth.",
+            description=(
+                "List SSH hosts the LLM may reach. Re-reads hosts.toml on each call; "
+                "call again to pick up newly-added/changed/removed entries."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -187,6 +190,23 @@ class Services:
         await self.pool.close_all()
         self.audit.close()
 
+    async def reload_hosts_from_disk(self) -> tuple[int, int, int]:
+        """Re-read ``hosts.toml`` and reconcile with the in-memory allowlist.
+
+        Returns ``(added, removed, changed)`` counts. Raises ``ConfigError`` /
+        ``OSError`` etc. from :func:`load_config` if the file is malformed; the
+        in-memory state is left untouched so the caller can fall back to it.
+        """
+        new_cfg = load_config()  # may raise
+        old = self.config.hosts
+        new = new_cfg.hosts
+        added = new.keys() - old.keys()
+        removed = old.keys() - new.keys()
+        changed = {a for a in old.keys() & new.keys() if old[a] != new[a]}
+        self.config = new_cfg
+        await self.pool.update_hosts(new, evict=removed | changed)
+        return (len(added), len(removed), len(changed))
+
 
 async def dispatch(svc: Services, name: str, args: dict[str, Any]) -> Any:
     """Resolve a tool call against the bundled services.
@@ -195,6 +215,27 @@ async def dispatch(svc: Services, name: str, args: dict[str, Any]) -> Any:
     :func:`call_tool` audits and re-raises.
     """
     if name == "hosts":
+        # Re-read hosts.toml so config edits made while the MCP is running
+        # become visible without a restart. Fail soft: if the file is now
+        # malformed we keep the previous in-memory allowlist and surface
+        # the failure in the audit log.
+        try:
+            added, removed, changed = await svc.reload_hosts_from_disk()
+            await svc.audit.record(
+                "_hosts_reload",
+                host=None,
+                status="ok",
+                added=added,
+                removed=removed,
+                changed=changed,
+            )
+        except Exception as exc:  # noqa: BLE001 — every reload audited
+            await svc.audit.record(
+                "_hosts_reload",
+                host=None,
+                status="error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
         return [
             {
                 "alias": h.alias,
