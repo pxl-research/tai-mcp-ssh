@@ -29,7 +29,7 @@ On the remote host, each session SHALL correspond to a tmux session named `tai-m
 - **AND** no tmux session SHALL be created and no command SHALL be sent
 
 ### Requirement: Sentinel-based completion detection
-After sending a command into the tmux pane, the MCP SHALL append a unique sentinel of the form `; echo __TAI_DONE__$?__<run_id>__` (or an equivalent shell-safe construction). Completion SHALL be detected by observing the sentinel in pane output. The exit code SHALL be extracted from the sentinel.
+After sending a command into the tmux pane, the MCP SHALL append a unique sentinel of the form `printf '\n__TAI_DONE__%d__<run_id>__\n' "$?"` (or an equivalent shell-safe construction). The sentinel SHALL start on its own line — preceded by a leading newline — so that line-anchored pattern matching cannot miss it when the user's command finishes without a trailing newline. Completion SHALL be detected by observing the sentinel in pane output. The exit code SHALL be extracted from the sentinel.
 
 #### Scenario: Command completes within timeout
 - **WHEN** the sentinel `__TAI_DONE__0__01JV3N…__` appears in the pane within the timeout window

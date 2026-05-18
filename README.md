@@ -2,7 +2,7 @@
 
 A small, opinionated [MCP](https://modelcontextprotocol.io) server that lets an LLM admin a handful of Linux servers (Raspberry Pis, Ubuntu VPSes) over SSH — without handing it your credentials, and without burning your token budget on `apt update` output.
 
-> **Status**: design complete, implementation not started. See `openspec/changes/bootstrap-ssh-mcp-server/` for the full spec.
+The current behavioural contract lives under `openspec/specs/` (one capability per directory). In-flight changes — proposed but not yet promoted into the canonical specs — live under `openspec/changes/`.
 
 ## What it does
 
