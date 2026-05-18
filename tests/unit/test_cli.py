@@ -132,6 +132,63 @@ def test_hosts_add_rejects_non_tty(tmp_home: Path, monkeypatch: pytest.MonkeyPat
     assert "interactive" in result.output
 
 
+def test_hosts_add_prompts_for_identity_file_on_key_auth(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for #8: interactive flow surfaces the identity_file option
+    # when auth=key. Cloud-VM users with a specific .pem shouldn't have to
+    # discover `--identity-file` to make `hosts add` produce a working entry.
+    monkeypatch.setattr("tai_mcp_ssh.cli._stdin_is_tty", lambda: True)
+    key_file = tmp_home / "ssh-key.pem"
+    key_file.write_text("dummy")
+    result = CliRunner().invoke(
+        main,
+        ["hosts", "add", "oracle"],
+        input=f"1.2.3.4\nubuntu\nkey\n{key_file}\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "Identity file" in result.output  # prompt was shown
+    hosts_path = tmp_home / "config" / "tai-mcp-ssh" / "hosts.toml"
+    text = hosts_path.read_text(encoding="utf-8")
+    # Path is absolute (expanded + resolved) in the saved entry.
+    assert f'identity_file = "{key_file.resolve()}"' in text
+
+
+def test_hosts_add_skips_identity_prompt_when_flag_supplied(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("tai_mcp_ssh.cli._stdin_is_tty", lambda: True)
+    key_file = tmp_home / "my.key"
+    key_file.write_text("dummy")
+    # No identity_file in the input — the flag should bypass the prompt.
+    result = CliRunner().invoke(
+        main,
+        ["hosts", "add", "vps", "--identity-file", str(key_file)],
+        input="1.2.3.4\nubuntu\nkey\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "Identity file" not in result.output
+    hosts_path = tmp_home / "config" / "tai-mcp-ssh" / "hosts.toml"
+    assert f'identity_file = "{key_file}"' in hosts_path.read_text(encoding="utf-8")
+
+
+def test_hosts_add_identity_prompt_blank_keeps_none(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Blank answer at the prompt leaves identity_file unset (fall back to
+    # ssh_config / agent), matching the historical default for users who
+    # don't have a one-off key.
+    monkeypatch.setattr("tai_mcp_ssh.cli._stdin_is_tty", lambda: True)
+    result = CliRunner().invoke(
+        main,
+        ["hosts", "add", "pi"],
+        input="\n\nkey\n\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+    hosts_path = tmp_home / "config" / "tai-mcp-ssh" / "hosts.toml"
+    assert "identity_file" not in hosts_path.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # `audit tail`
 # ---------------------------------------------------------------------------

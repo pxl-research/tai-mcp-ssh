@@ -173,6 +173,27 @@ def test_extract_output_returns_empty_when_no_markers() -> None:
     assert _extract_output("garbage with no markers", "01J") == ""
 
 
+def test_done_sentinel_matches_after_no_trailing_newline() -> None:
+    # Regression for #7. The production wrapper now emits the DONE marker
+    # via `printf '\n__TAI_DONE__%d__<id>__\n' "$?"`, so even when the
+    # user command's last output line lacks a trailing newline (curl,
+    # printf without \n, echo -n) the marker still lands at column 0
+    # and the line-anchored regex / _extract_output both succeed.
+    log_id = "01J"
+    content = (
+        f"__TAI_START__{log_id}__\n"
+        '{"version":"0.23.3"}'  # no trailing newline (curl-style)
+        f"\n__TAI_DONE__0__{log_id}__\n"
+    )
+    done_re = re.compile(rf"^__TAI_DONE__(\d+)__{re.escape(log_id)}__\s*$", re.MULTILINE)
+    m = done_re.search(content)
+    assert m is not None
+    assert m.group(1) == "0"
+    # _extract_output returns the body line(s). The printf's leading \n
+    # leaves a single empty line before DONE, which is harmless tail noise.
+    assert _extract_output(content, log_id).startswith('{"version":"0.23.3"}')
+
+
 def test_extract_partial_output_after_start_only() -> None:
     content = "prompt $ ...\n__TAI_START__abc__\npartial line 1\npartial line 2"
     assert _extract_partial_output(content, "abc") == "partial line 1\npartial line 2"
@@ -319,7 +340,11 @@ async def test_run_wraps_user_command_in_eval(tmp_path: Path) -> None:
     typed = args[args.index("-l") + 1]
     # Outer sentinels survive a parse error in the user command.
     assert "echo __TAI_START__" in typed
-    assert "echo __TAI_DONE__$?__" in typed
+    # DONE marker is emitted via `printf '\n...\n'` so it always lands
+    # at start-of-line (regression for #7), regardless of whether the
+    # user command's last output had a trailing newline.
+    assert "printf '\\n__TAI_DONE__%d__" in typed
+    assert '"$?"' in typed
     # User command goes through eval (current shell — state persists).
     # No child-shell wrapper anywhere.
     assert "eval 'echo (oops)'" in typed

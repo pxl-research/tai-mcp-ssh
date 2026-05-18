@@ -17,7 +17,7 @@ import pytest
 
 from tai_mcp_ssh.audit import AuditLog
 from tai_mcp_ssh.config import AuditSettings, Config, Host
-from tai_mcp_ssh.errors import HostNotAllowed, TransferDenied
+from tai_mcp_ssh.errors import ConfigError, HostNotAllowed, TransferDenied
 from tai_mcp_ssh.server import (
     Services,
     _dispatch_and_audit,
@@ -82,25 +82,155 @@ def test_tool_specs_required_fields_match_design() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_dispatch_hosts_returns_redacted_list(tmp_path: Path) -> None:
-    svc = _make_services(
-        tmp_path,
-        hosts={
-            "pi": Host(alias="pi", host="192.168.1.42", user="pi", port=22),
-            "vps": Host(
-                alias="vps",
-                host="1.2.3.4",
-                auth="password",
-                password_ref="keychain://tai-mcp-ssh/vps",
-            ),
-        },
+async def test_dispatch_hosts_returns_redacted_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hosts = {
+        "pi": Host(alias="pi", host="192.168.1.42", user="pi", port=22),
+        "vps": Host(
+            alias="vps",
+            host="1.2.3.4",
+            auth="password",
+            password_ref="keychain://tai-mcp-ssh/vps",
+        ),
+    }
+    svc = _make_services(tmp_path, hosts=hosts)
+    # `hosts` dispatch reloads from disk; pin load_config so this test
+    # doesn't depend on the developer's real ~/.config/tai-mcp-ssh/hosts.toml.
+    monkeypatch.setattr(
+        "tai_mcp_ssh.server.load_config",
+        lambda: Config(hosts=hosts, audit=AuditSettings()),
     )
+    svc.pool.update_hosts = AsyncMock()
     result = await dispatch(svc, "hosts", {})
     assert {h["alias"] for h in result} == {"pi", "vps"}
     # No secrets, no keychain references in the response.
     flattened = json.dumps(result)
     assert "keychain://" not in flattened
     assert "password_ref" not in flattened
+    svc.audit.close()
+
+
+# ---------------------------------------------------------------------------
+# dispatch "hosts" reload behavior (issue #9 / reload-hosts-on-call)
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_hosts_reloads_and_audits_diff_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = {"pi": Host(alias="pi", host="192.168.1.42")}
+    after_edit = {
+        "pi": Host(alias="pi", host="10.0.0.42"),  # IP changed
+        "vps": Host(alias="vps", host="1.2.3.4"),  # added
+    }
+    svc = _make_services(tmp_path, hosts=initial)
+    monkeypatch.setattr(
+        "tai_mcp_ssh.server.load_config",
+        lambda: Config(hosts=after_edit, audit=AuditSettings()),
+    )
+    svc.pool.update_hosts = AsyncMock()
+
+    result = await dispatch(svc, "hosts", {})
+
+    # Returned list reflects the freshly-reloaded config, not the original.
+    assert {h["alias"] for h in result} == {"pi", "vps"}
+    # update_hosts was called with the new dict and the eviction set
+    # (changed alias only — additions need no eviction).
+    svc.pool.update_hosts.assert_awaited_once_with(after_edit, evict={"pi"})
+    # One _hosts_reload audit record with the diff counts.
+    records = _audit_records(tmp_path, "_system")
+    reloads = [r for r in records if r["tool"] == "_hosts_reload"]
+    assert len(reloads) == 1
+    assert reloads[0]["status"] == "ok"
+    assert reloads[0]["added"] == 1
+    assert reloads[0]["removed"] == 0
+    assert reloads[0]["changed"] == 1
+    svc.audit.close()
+
+
+async def test_dispatch_hosts_fails_soft_on_bad_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = {"pi": Host(alias="pi", host="192.168.1.42")}
+    svc = _make_services(tmp_path, hosts=initial)
+
+    def boom() -> Config:
+        raise ConfigError("malformed hosts.toml")
+
+    monkeypatch.setattr("tai_mcp_ssh.server.load_config", boom)
+    svc.pool.update_hosts = AsyncMock()  # must not be called on failure
+
+    result = await dispatch(svc, "hosts", {})
+
+    # Pre-failure list is returned; in-memory allowlist is untouched.
+    assert {h["alias"] for h in result} == {"pi"}
+    assert svc.config.hosts == initial
+    svc.pool.update_hosts.assert_not_awaited()
+    # The failure is recorded as a _hosts_reload error.
+    records = _audit_records(tmp_path, "_system")
+    reloads = [r for r in records if r["tool"] == "_hosts_reload"]
+    assert len(reloads) == 1
+    assert reloads[0]["status"] == "error"
+    assert "ConfigError" in reloads[0]["error"]
+    # Schema must match the success branch: counts present, all zero on failure.
+    assert reloads[0]["added"] == 0
+    assert reloads[0]["removed"] == 0
+    assert reloads[0]["changed"] == 0
+    svc.audit.close()
+
+
+async def test_dispatch_hosts_no_op_reload_audits_zero_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hosts = {"pi": Host(alias="pi", host="192.168.1.42")}
+    svc = _make_services(tmp_path, hosts=hosts)
+    monkeypatch.setattr(
+        "tai_mcp_ssh.server.load_config",
+        lambda: Config(hosts=hosts, audit=AuditSettings()),
+    )
+    svc.pool.update_hosts = AsyncMock()
+
+    await dispatch(svc, "hosts", {})
+
+    # No-op reload: empty evict set, all counts zero, still audited.
+    svc.pool.update_hosts.assert_awaited_once_with(hosts, evict=set())
+    records = _audit_records(tmp_path, "_system")
+    reloads = [r for r in records if r["tool"] == "_hosts_reload"]
+    assert len(reloads) == 1
+    assert reloads[0]["status"] == "ok"
+    assert reloads[0]["added"] == 0
+    assert reloads[0]["removed"] == 0
+    assert reloads[0]["changed"] == 0
+    svc.audit.close()
+
+
+async def test_services_reload_hosts_from_disk_returns_diff_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Direct unit test of the helper: confirms the diff math without going
+    # through dispatch + audit.
+    initial = {
+        "pi": Host(alias="pi", host="192.168.1.42"),
+        "vps": Host(alias="vps", host="1.2.3.4"),
+    }
+    after = {
+        "pi": Host(alias="pi", host="192.168.1.42"),  # unchanged
+        "newbox": Host(alias="newbox", host="9.9.9.9"),  # added
+        # vps removed
+    }
+    svc = _make_services(tmp_path, hosts=initial)
+    monkeypatch.setattr(
+        "tai_mcp_ssh.server.load_config",
+        lambda: Config(hosts=after, audit=AuditSettings()),
+    )
+    svc.pool.update_hosts = AsyncMock()
+
+    added, removed, changed = await svc.reload_hosts_from_disk()
+    assert (added, removed, changed) == (1, 1, 0)
+    svc.pool.update_hosts.assert_awaited_once_with(after, evict={"vps"})
+    # In-memory config now reflects the reloaded one.
+    assert svc.config.hosts == after
     svc.audit.close()
 
 
