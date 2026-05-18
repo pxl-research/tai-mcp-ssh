@@ -173,6 +173,10 @@ async def test_dispatch_hosts_fails_soft_on_bad_toml(
     assert len(reloads) == 1
     assert reloads[0]["status"] == "error"
     assert "ConfigError" in reloads[0]["error"]
+    # Schema must match the success branch: counts present, all zero on failure.
+    assert reloads[0]["added"] == 0
+    assert reloads[0]["removed"] == 0
+    assert reloads[0]["changed"] == 0
     svc.audit.close()
 
 

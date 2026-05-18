@@ -230,10 +230,16 @@ async def dispatch(svc: Services, name: str, args: dict[str, Any]) -> Any:
                 changed=changed,
             )
         except Exception as exc:  # noqa: BLE001 — every reload audited
+            # Counts are zero on failure: no diff was applied because the
+            # in-memory state is left untouched. Including them keeps the
+            # `_hosts_reload` record schema uniform across ok/error.
             await svc.audit.record(
                 "_hosts_reload",
                 host=None,
                 status="error",
+                added=0,
+                removed=0,
+                changed=0,
                 error=f"{type(exc).__name__}: {exc}",
             )
         return [
