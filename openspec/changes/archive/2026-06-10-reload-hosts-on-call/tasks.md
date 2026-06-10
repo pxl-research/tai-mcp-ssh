@@ -33,13 +33,13 @@
 
 ## 7. Manual smoke
 
-- [ ] 7.1 With the MCP serving, run `tai-mcp-ssh hosts add smoke-new-host` (key auth, dummy host) — does not restart the MCP.
-- [ ] 7.2 In the connected LLM, call the `hosts` tool — verify `smoke-new-host` is in the response and an audit `_hosts_reload` record exists.
-- [ ] 7.3 Edit `hosts.toml` to remove `smoke-new-host`. Call `hosts` again. Verify the alias is gone and `session_run("smoke-new-host/x", "true")` raises `HostNotAllowed`.
-- [ ] 7.4 Edit `hosts.toml` to introduce a TOML syntax error. Call `hosts`. Verify the response is the pre-failure list and an audit `_hosts_reload` with `status="error"` is recorded. Restore the file.
+- [x] 7.1 With the MCP serving, run `tai-mcp-ssh hosts add smoke-new-host` (key auth, dummy host) — does not restart the MCP. (Verified 2026-06-10 against the live MCP.)
+- [x] 7.2 In the connected LLM, call the `hosts` tool — verify `smoke-new-host` is in the response and an audit `_hosts_reload` record exists. (Response included the new alias; `_system` audit shows `_hosts_reload` with `added:1`.)
+- [x] 7.3 Edit `hosts.toml` to remove `smoke-new-host`. Call `hosts` again. Verify the alias is gone and `session_run("smoke-new-host/x", "true")` raises `HostNotAllowed`. (Alias gone, reload audited `removed:1`; the refused call audited `status:"rejected"` under `audit/smoke-new-host/`.)
+- [x] 7.4 Edit `hosts.toml` to introduce a TOML syntax error. Call `hosts`. Verify the response is the pre-failure list and an audit `_hosts_reload` with `status="error"` is recorded. Restore the file. (Pre-failure list returned; audit captured the `TOMLDecodeError`; file restored.)
 
 ## 8. Wrap up
 
-- [ ] 8.1 Commit on a feature branch with a `FEAT:` message referencing #9.
-- [ ] 8.2 Open PR; on merge, `/opsx:archive reload-hosts-on-call` to promote the deltas into the canonical specs.
-- [ ] 8.3 Close issue #9 with a reference to the commit/PR.
+- [x] 8.1 Commit on a feature branch with a `FEAT:` message referencing #9. (Commit `27c664d`, merged to main.)
+- [x] 8.2 Open PR; on merge, `/opsx:archive reload-hosts-on-call` to promote the deltas into the canonical specs. (PR #10 merged 2026-05-18; deltas synced into `openspec/specs/` and change archived 2026-06-10.)
+- [x] 8.3 Close issue #9 with a reference to the commit/PR. (Issue #9 closed 2026-05-13.)
