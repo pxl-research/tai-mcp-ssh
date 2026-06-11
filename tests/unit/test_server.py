@@ -56,7 +56,7 @@ def _make_services(
 # ---------------------------------------------------------------------------
 
 
-def test_tool_specs_returns_seven() -> None:
+def test_tool_specs_returns_eight() -> None:
     names = [t.name for t in tool_specs()]
     assert names == [
         "hosts",
@@ -64,6 +64,7 @@ def test_tool_specs_returns_seven() -> None:
         "session_run",
         "session_wait",
         "session_kill",
+        "session_reset",
         "put",
         "get",
     ]
@@ -286,6 +287,15 @@ async def test_dispatch_session_kill(tmp_path: Path) -> None:
     svc.sessions.kill = AsyncMock(return_value={"killed": True})
     result = await dispatch(svc, "session_kill", {"session_id": "pi/x"})
     assert result == {"killed": True}
+    svc.audit.close()
+
+
+async def test_dispatch_session_reset(tmp_path: Path) -> None:
+    svc = _make_services(tmp_path)
+    svc.sessions.reset = AsyncMock(return_value={"reset": True})
+    result = await dispatch(svc, "session_reset", {"session_id": "pi/x"})
+    assert result == {"reset": True}
+    svc.sessions.reset.assert_awaited_once_with("pi/x")
     svc.audit.close()
 
 

@@ -125,6 +125,21 @@ def tool_specs() -> list[mtypes.Tool]:
             },
         ),
         mtypes.Tool(
+            name="session_reset",
+            description=(
+                "Abandon a stuck command and return the session to idle WITHOUT "
+                "killing the tmux pane (cwd/env/children survive). Use when a "
+                "command is wedged and its completion will never arrive; call "
+                "session_wait first if it may just be slow."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}},
+                "required": ["session_id"],
+                "additionalProperties": False,
+            },
+        ),
+        mtypes.Tool(
             name="put",
             description=(
                 "Upload a local file to the remote via SFTP. Runs as the SSH "
@@ -275,6 +290,8 @@ async def dispatch(svc: Services, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "session_kill":
         return await svc.sessions.kill(args["session_id"])
+    if name == "session_reset":
+        return await svc.sessions.reset(args["session_id"])
     if name == "put":
         return await svc.transfer.put(
             args["host"],

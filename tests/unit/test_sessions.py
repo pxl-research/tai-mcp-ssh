@@ -802,3 +802,114 @@ async def test_wait_clears_local_state_on_host_unreachable(tmp_path: Path) -> No
         await sm.wait("pi/default")
     assert sm.list_sessions() == []
     audit.close()
+
+
+# ---------------------------------------------------------------------------
+# session_reset — lightweight recovery without killing the pane (issue #5)
+# ---------------------------------------------------------------------------
+
+
+def _wedged_connection() -> FakeConnection:
+    """A connection whose log never yields a DONE sentinel, so a run() against
+    it lands in `still_running` with `log_id` still set (an in-flight session)."""
+    fc = FakeConnection("pi")
+    fc.add_handler(r"^tail -c ", lambda _cmd: FakeProc(0, "", ""))
+    return fc
+
+
+async def test_reset_busy_session_returns_to_idle_and_reuses_pane(tmp_path: Path) -> None:
+    fc = _wedged_connection()
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    first = await sm.run("pi/default", "wedged", timeout=0.1)
+    assert first.status == "still_running"
+
+    result = await sm.reset("pi/default")
+    assert result == {"reset": True}
+
+    # Next run is accepted (not busy) and REUSES the pane: exactly one tmux
+    # create across both runs, and the pane is never killed.
+    second = await sm.run("pi/default", "again", timeout=0.1)
+    assert second.status != "busy"
+    assert len([c for c in fc.run_calls if "tmux has-session" in c]) == 1
+    assert not any("tmux kill-session" in c for c in fc.run_calls)
+    audit.close()
+
+
+async def test_reset_audits_one_record(tmp_path: Path) -> None:
+    fc = _wedged_connection()
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "wedged", timeout=0.1)
+    await sm.reset("pi/default")
+
+    resets = [r for r in _audit_records(tmp_path, "pi") if r["tool"] == "session_reset"]
+    assert len(resets) == 1
+    assert resets[0]["session"] == "pi/default"
+    assert resets[0]["log_id"]
+    audit.close()
+
+
+async def test_reset_idle_session_is_noop(tmp_path: Path) -> None:
+    fc = FakeConnection("pi")
+    fc.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="ok",
+            ),
+            "",
+        ),
+    )
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    done = await sm.run("pi/default", "ok")
+    assert done.status == "done"  # session is now idle; log_id cleared
+
+    result = await sm.reset("pi/default")
+    assert result == {"reset": False}
+    assert not [r for r in _audit_records(tmp_path, "pi") if r["tool"] == "session_reset"]
+    audit.close()
+
+
+async def test_reset_unknown_session_is_noop(tmp_path: Path) -> None:
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({}), audit)  # type: ignore[arg-type]
+    result = await sm.reset("ghost/default")
+    assert result == {"reset": False}
+    assert _audit_records(tmp_path, "ghost") == []
+    audit.close()
+
+
+async def test_reset_works_when_host_unreachable(tmp_path: Path) -> None:
+    # reset opens no connection, so a session wedged *because* the host went
+    # flaky can still be cleared.
+    class _HealThenDiePool:
+        def __init__(self, conn: FakeConnection, die_after: int) -> None:
+            self._conn = conn
+            self._die_after = die_after
+            self.calls = 0
+
+        async def get(self, alias: str) -> FakeConnection:
+            self.calls += 1
+            if self.calls > self._die_after:
+                raise HostUnreachable(f"{alias}: gone")
+            return self._conn
+
+    fc = _wedged_connection()
+    pool = _HealThenDiePool(fc, die_after=1)
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(pool, audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "wedged", timeout=0.1)  # one get() -> calls == 1
+    assert pool.calls == 1
+
+    result = await sm.reset("pi/default")  # host now unreachable
+    assert result == {"reset": True}
+    assert pool.calls == 1  # reset opened no connection
+    audit.close()
