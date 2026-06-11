@@ -229,6 +229,33 @@ class SessionManager:
         await self._audit.record("session_kill", host=host, session=session_id, killed=killed)
         return {"killed": killed}
 
+    async def reset(self, session_id: str) -> dict[str, bool]:
+        """Abandon tracking of the current in-flight command and return the
+        session to idle, leaving the remote tmux pane (cwd, environment, and
+        backgrounded children) intact.
+
+        A lighter-weight recovery than :meth:`kill` for the case where a
+        command sent successfully but its DONE sentinel will never arrive
+        (``exec sh`` mid-session, a corrupted/truncated log). Purely local:
+        it opens no connection, so a session wedged *because* the host is
+        flaky can still be reset. Returns ``{"reset": True}`` when an
+        in-flight command was cleared, ``{"reset": False}`` when the session
+        was already idle or unknown.
+        """
+        parse_session_id(session_id)  # validate shape; raises on malformed
+        state = self._sessions.get(session_id)
+        if state is None or state.log_id is None:
+            return {"reset": False}
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            if state.log_id is None:  # re-check under lock: a race cleared it
+                return {"reset": False}
+            await self._audit.record(
+                "session_reset", host=state.host, session=session_id, log_id=state.log_id
+            )
+            self._clear_state(state)
+        return {"reset": True}
+
     def _forget(self, session_id: str) -> None:
         """Drop local session bookkeeping. The per-session lock stays put:
         popping it while a waiter holds a reference would let a follow-up

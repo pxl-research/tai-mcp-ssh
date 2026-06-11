@@ -6,7 +6,8 @@ The current behavioural contract lives under `openspec/specs/` (one capability p
 
 ## What it does
 
-- Exposes 7 MCP tools to an LLM: `hosts`, `session_list`, `session_run`, `session_wait`, `session_kill`, `put`, `get`.
+- Exposes 8 MCP tools to an LLM: `hosts`, `session_list`, `session_run`, `session_wait`, `session_kill`, `session_reset`, `put`, `get`.
+- `session_reset` is the lightweight escape hatch for a wedged command: it returns the session to idle without killing the tmux pane (cwd/env/children survive), unlike `session_kill` which tears the pane down.
 - Runs every command inside a named `tmux` session on the remote host, so shell state (cwd, env, activated venvs) persists across calls.
 - Captures all output to a log file on the remote (`~/.tai-ssh/logs/<log_id>.log`). Tool responses return head + tail slices; the LLM uses plain `tail`/`grep`/`cat` against the log path to read more.
 - Detects sudo prompts and other interactive prompts the LLM cannot answer. Hands off to you via `tmux attach`, then resumes once you detach.
