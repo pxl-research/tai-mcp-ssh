@@ -62,7 +62,7 @@ files = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-ra --cov=tai_mcp_ssh --cov-report=term-missing --cov-fail-under=80"
+addopts = "-ra --cov=tai_mcp_ssh --cov-report=term-missing --cov-fail-under=85"
 
 [tool.coverage.run]
 source = ["src/tai_mcp_ssh"]
