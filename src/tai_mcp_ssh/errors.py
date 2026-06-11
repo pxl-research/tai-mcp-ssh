@@ -23,16 +23,8 @@ class TmuxMissing(TaiMcpSshError):
     """Managed host lacks `tmux` on PATH."""
 
 
-class SessionBusy(TaiMcpSshError):
-    """Session is awaiting completion or input; refuses a new command."""
-
-
 class KeychainUnavailable(TaiMcpSshError):
     """OS keychain is not accessible; password-auth host cannot be reached."""
-
-
-class SecretInCommand(TaiMcpSshError):
-    """Command appears to contain a literal secret; refusing to forward it."""
 
 
 class TransferDenied(TaiMcpSshError):

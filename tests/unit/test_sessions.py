@@ -38,7 +38,7 @@ from tai_mcp_ssh.sessions import (
 @dataclass
 class FakeProc:
     exit_status: int = 0
-    stdout: str = ""
+    stdout: str | bytes = ""
     stderr: str = ""
 
 
@@ -76,7 +76,9 @@ class FakeConnection:
     def append_log(self, path: str, content: str) -> None:
         self.log_files[path] = self.log_files.get(path, "") + content
 
-    async def run(self, command: str, *, check: bool = False) -> FakeProc:
+    async def run(
+        self, command: str, *, check: bool = False, encoding: str | None = "utf-8"
+    ) -> FakeProc:
         self.run_calls.append(command)
 
         for pattern, handler in self.handlers:
@@ -463,6 +465,79 @@ async def test_run_times_out_returns_still_running(tmp_path: Path) -> None:
     result = await sm.run("pi/default", "long", timeout=0.2)
     assert result.status == "still_running"
     assert result.exit is None
+    audit.close()
+
+
+async def test_run_recovers_after_failed_send(tmp_path: Path) -> None:
+    # A non-fatal failure during _send_command (e.g. tmux command returns
+    # non-zero because the pane was killed externally) must NOT leave the
+    # session wedged `busy`; the next run() should reuse it as idle.
+    fc = FakeConnection("pi")
+    fail = {"on": True}
+
+    def pipe_pane_handler(_cmd: str) -> FakeProc:
+        if fail["on"]:
+            raise RuntimeError("pipe-pane failed")
+        return FakeProc(0, "", "")
+
+    fc.add_handler(r"tmux pipe-pane", pipe_pane_handler)
+    # Second run (after we flip fail off) completes normally.
+    fc.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="ok",
+            ),
+            "",
+        ),
+    )
+
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError):
+        await sm.run("pi/default", "first")
+
+    # Session must be recoverable, not stuck busy.
+    fail["on"] = False
+    result = await sm.run("pi/default", "second")
+    assert result.status == "done"
+    assert result.exit == 0
+    audit.close()
+
+
+async def test_read_log_offset_exact_across_split_multibyte(tmp_path: Path) -> None:
+    # Regression: the byte-addressed `tail -c +N` offset must advance by the
+    # exact bytes read, even when a multibyte char (é = 0xC3 0xA9) is split
+    # across two polls. A fake that honours the offset would lose bytes if the
+    # offset drifted (the old code re-encoded a lossy-decoded str).
+    fc = FakeConnection("pi")
+    calls = {"n": 0}
+
+    def tail_handler(cmd: str) -> FakeProc:
+        log_id = re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1)  # type: ignore[union-attr]
+        n = int(re.search(r"tail -c \+(\d+)", cmd).group(1))  # type: ignore[union-attr]
+        start = f"__TAI_START__{log_id}__\n".encode()
+        done = f"__TAI_DONE__0__{log_id}__\n".encode()
+        full = start + b"caf\xc3\xa9 done\n" + done
+        calls["n"] += 1
+        # Poll 1: file only written up to the first byte of é (split point).
+        available = full[: len(start) + 4] if calls["n"] == 1 else full
+        return FakeProc(0, available[n - 1 :], "")  # honour the byte offset
+
+    fc.add_handler(r"^tail -c ", tail_handler)
+
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    result = await sm.run("pi/default", "printf 'café done\\n'", timeout=1.0)
+    assert result.status == "done"
+    assert result.exit == 0
+    # Output reconstructs exactly — no dropped \xa9, no drift.
+    assert "café done" in result.head
+    assert result.bytes == len("café done".encode())
     audit.close()
 
 
