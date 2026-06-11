@@ -243,12 +243,14 @@ class SessionManager:
         was already idle or unknown.
         """
         parse_session_id(session_id)  # validate shape; raises on malformed
-        state = self._sessions.get(session_id)
-        if state is None or state.log_id is None:
-            return {"reset": False}
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            if state.log_id is None:  # re-check under lock: a race cleared it
+            # Fetch the registered state *under* the lock (as run/wait do), not
+            # before it: a concurrent _forget (HostUnreachable in run/wait) or a
+            # fresh run() could pop or replace the entry between lookup and lock,
+            # leaving us to clear a stale object and audit a session that's gone.
+            state = self._sessions.get(session_id)
+            if state is None or state.log_id is None:
                 return {"reset": False}
             await self._audit.record(
                 "session_reset", host=state.host, session=session_id, log_id=state.log_id
