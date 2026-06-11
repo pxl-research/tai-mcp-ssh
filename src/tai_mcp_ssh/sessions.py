@@ -10,10 +10,11 @@ known interactive prompts (sudo, hostkey, apt-confirm, ...).
 from __future__ import annotations
 
 import asyncio
+import codecs
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -89,13 +90,17 @@ class _SessionState:
     command: str | None = None
     reason: str | None = None
     # Incremental-read cursor over the remote per-command log file.
-    # log_offset = number of bytes already pulled into log_buffer; each
-    # poll only fetches new bytes via `tail -c +<offset+1>`. The buffer is
-    # raw bytes so the byte-addressed offset stays exact even when output
-    # is non-UTF-8 or a multibyte char is split across two reads; decoding
-    # happens only when we hand content to the scanners.
+    # log_offset = number of bytes already pulled; each poll fetches only the
+    # new bytes via `tail -c +<offset+1>` and feeds them through a stateful
+    # incremental decoder into log_text. Tracking the offset in raw bytes
+    # keeps it exact even for non-UTF-8 output, and the decoder buffers an
+    # incomplete trailing multibyte sequence until its continuation arrives —
+    # so we never re-decode the whole buffer per poll.
     log_offset: int = 0
-    log_buffer: bytes = b""
+    log_text: str = ""
+    log_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace")
+    )
     # Highest buffer index we've already searched for the DONE sentinel.
     # Next scan starts a small overlap behind this so a marker straddling
     # two chunks still matches.
@@ -392,19 +397,19 @@ class SessionManager:
         # number of bytes read (re-encoding a lossy-decoded str would drift).
         result = await conn.run(cmd, check=False, encoding=None)
         if result.exit_status != 0:
-            # File may not exist yet; return whatever we've buffered so far.
-            return state.log_buffer.decode("utf-8", errors="replace")
+            # File may not exist yet; return whatever we've decoded so far.
+            return state.log_text
         raw = result.stdout
         if isinstance(raw, str):
             raw = raw.encode("utf-8")
         elif raw is None:
             raw = b""
         if raw:
-            state.log_buffer += raw
             state.log_offset += len(raw)
-        # A multibyte char split at the tail decodes to a transient U+FFFD that
-        # resolves on the next poll once the continuation bytes arrive.
-        return state.log_buffer.decode("utf-8", errors="replace")
+            # Decode only the new bytes; the decoder holds any split multibyte
+            # char until its continuation arrives on the next poll.
+            state.log_text += state.log_decoder.decode(raw)
+        return state.log_text
 
     def _attach_hint(self, state: _SessionState) -> str:
         return f"ssh {state.host} -t tmux attach -t {_TMUX_PREFIX}/{state.name}"
@@ -470,7 +475,8 @@ class SessionManager:
         state.started_at = None
         state.last_used_at = self._now()
         state.log_offset = 0
-        state.log_buffer = b""
+        state.log_text = ""
+        state.log_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         state.scan_pos = 0
 
     async def _audit_event(self, state: _SessionState, result: RunResult, *, tool: str) -> None:
