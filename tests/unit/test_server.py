@@ -305,7 +305,21 @@ async def test_dispatch_get_with_default_local_path(tmp_path: Path) -> None:
     svc = _make_services(tmp_path)
     svc.transfer.get = AsyncMock()
     await dispatch(svc, "get", {"host": "pi", "remote_path": "/etc/hostname"})
-    svc.transfer.get.assert_awaited_once_with("pi", "/etc/hostname", None, reason=None)
+    svc.transfer.get.assert_awaited_once_with(
+        "pi", "/etc/hostname", None, reason=None, allow_outside=False
+    )
+    svc.audit.close()
+
+
+async def test_dispatch_get_forwards_allow_outside(tmp_path: Path) -> None:
+    svc = _make_services(tmp_path)
+    svc.transfer.get = AsyncMock()
+    await dispatch(
+        svc,
+        "get",
+        {"host": "pi", "remote_path": "/x", "local_path": "/tmp/y", "allow_outside": True},
+    )
+    svc.transfer.get.assert_awaited_once_with("pi", "/x", "/tmp/y", reason=None, allow_outside=True)
     svc.audit.close()
 
 

@@ -156,6 +156,13 @@ def tool_specs() -> list[mtypes.Tool]:
                     "remote_path": {"type": "string"},
                     "local_path": {"type": "string"},
                     "reason": {"type": "string"},
+                    "allow_outside": {
+                        "type": "boolean",
+                        "description": (
+                            "Permit writing outside the downloads dir. Off by "
+                            "default; set only to land a file elsewhere on purpose."
+                        ),
+                    },
                 },
                 "required": ["host", "remote_path"],
                 "additionalProperties": False,
@@ -281,6 +288,7 @@ async def dispatch(svc: Services, name: str, args: dict[str, Any]) -> Any:
             args["remote_path"],
             args.get("local_path"),
             reason=args.get("reason"),
+            allow_outside=args.get("allow_outside", False),
         )
     raise ValueError(f"unknown tool: {name}")
 
