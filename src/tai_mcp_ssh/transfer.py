@@ -168,7 +168,7 @@ class TransferManager:
             )
             denied = TransferDenied(
                 f"local destination {dest} is outside the downloads dir {root}; "
-                f"pass allow_outside=true to write there deliberately."
+                f"enable the allow_outside option to write there deliberately."
             )
             denied.audited = True  # type: ignore[attr-defined]
             raise denied

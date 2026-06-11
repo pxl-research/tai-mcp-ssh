@@ -156,7 +156,13 @@ def tool_specs() -> list[mtypes.Tool]:
                     "remote_path": {"type": "string"},
                     "local_path": {"type": "string"},
                     "reason": {"type": "string"},
-                    "allow_outside": {"type": "boolean"},
+                    "allow_outside": {
+                        "type": "boolean",
+                        "description": (
+                            "Permit writing outside the downloads dir. Off by "
+                            "default; set only to land a file elsewhere on purpose."
+                        ),
+                    },
                 },
                 "required": ["host", "remote_path"],
                 "additionalProperties": False,
