@@ -27,5 +27,5 @@
 
 ## 5. Wrap up
 
-- [ ] 5.1 Commit on this feature branch with a `FEAT:` message referencing the review finding.
-- [ ] 5.2 Open PR; on merge, `/opsx:archive confine-get-local-path` to sync the file-transfer delta into the canonical specs.
+- [x] 5.1 Commit on this feature branch with a `FEAT:` message referencing the review finding.
+- [x] 5.2 Open PR; on merge, `/opsx:archive confine-get-local-path` to sync the file-transfer delta into the canonical specs.
