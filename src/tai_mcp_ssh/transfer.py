@@ -134,13 +134,45 @@ class TransferManager:
         local_path: str | os.PathLike[str] | None = None,
         *,
         reason: str | None = None,
+        allow_outside: bool = False,
     ) -> TransferResult:
-        """Download ``remote_path`` from ``host`` via SFTP."""
+        """Download ``remote_path`` from ``host`` via SFTP.
+
+        The destination is confined to the downloads dir
+        (``paths.downloads_dir()``) by default; a resolved path outside that
+        tree is rejected unless ``allow_outside`` is set. Containment is
+        checked before any SSH connection is opened or any local file is
+        created.
+        """
         dest = (
             Path(local_path).expanduser()
             if local_path is not None
             else paths.downloads_dir(host) / Path(remote_path).name
-        )
+        ).resolve()
+        # resolve() collapses `..` and follows symlinks (and works on a
+        # not-yet-existing path on 3.11+), so neither traversal nor a planted
+        # symlink escapes the check. Resolve the root the same way for
+        # symlink-consistent comparison (e.g. macOS /var -> /private/var).
+        root = paths.downloads_dir().resolve()
+        outside = not dest.is_relative_to(root)
+
+        if outside and not allow_outside:
+            await self._audit.record(
+                "get",
+                host=host,
+                remote_path=remote_path,
+                local_path=str(dest),
+                reason=reason,
+                status="rejected",
+                error="destination outside downloads dir",
+            )
+            denied = TransferDenied(
+                f"local destination {dest} is outside the downloads dir {root}; "
+                f"pass allow_outside=true to write there deliberately."
+            )
+            denied.audited = True  # type: ignore[attr-defined]
+            raise denied
+
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         digest = hashlib.sha256()
@@ -197,6 +229,7 @@ class TransferManager:
             sha256=sha,
             reason=reason,
             status="done",
+            outside=outside,
         )
         return TransferResult(
             bytes=size,
