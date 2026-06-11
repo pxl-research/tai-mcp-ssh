@@ -57,6 +57,31 @@ async def test_secret_keys_redacted(tmp_path: Path) -> None:
     assert r["cmd"] == "ls"  # non-secret field preserved
 
 
+async def test_cmd_secrets_redacted(tmp_path: Path) -> None:
+    log = AuditLog(root=tmp_path)
+    await log.record("session_run", host="pi", cmd="mysql --password=hunter2 -e 'select 1'")
+    await log.record("session_run", host="pi", cmd="echo keychain://tai-mcp-ssh/pi")
+    log.close()
+    today = datetime.now(UTC).date().isoformat()
+    records = _read_jsonl(tmp_path / "pi" / f"{today}.jsonl")
+    assert "hunter2" not in records[0]["cmd"]
+    assert "--password=<redacted>" in records[0]["cmd"]
+    assert records[1]["cmd"] == "echo keychain://<redacted>"
+
+
+async def test_cmd_redaction_leaves_innocent_commands_untouched(tmp_path: Path) -> None:
+    # The redactor must not corrupt ambiguous short flags that collide with
+    # secret forms (`-p` in cp/mkdir/ssh is not a password).
+    log = AuditLog(root=tmp_path)
+    await log.record("session_run", host="pi", cmd="cp -p a b")
+    await log.record("session_run", host="pi", cmd="mkdir -p /srv/x")
+    log.close()
+    today = datetime.now(UTC).date().isoformat()
+    records = _read_jsonl(tmp_path / "pi" / f"{today}.jsonl")
+    assert records[0]["cmd"] == "cp -p a b"
+    assert records[1]["cmd"] == "mkdir -p /srv/x"
+
+
 async def test_reserved_ts_field_ignored(tmp_path: Path) -> None:
     # `tool` and `host` collide at the Python signature level so callers
     # can't pass them via kwargs anyway; `ts` is the one auto-filled

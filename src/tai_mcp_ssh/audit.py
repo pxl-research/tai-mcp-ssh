@@ -47,6 +47,24 @@ _DATE_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
 # Reserved fields auto-filled by record(); callers may not override.
 _RESERVED: frozenset[str] = frozenset({"ts", "tool", "host"})
 
+# Best-effort scrubbing of secrets that an LLM might embed in a `cmd` string.
+# Deliberately limited to two HIGH-CONFIDENCE forms to avoid corrupting
+# innocent commands: the long-form `--password=VALUE` / `--password VALUE`
+# flag and `keychain://` references. Ambiguous short flags like `-p` are NOT
+# matched (they collide with `cp -p`, `mkdir -p`, `ssh -p`, ...). The real
+# defense remains NOPASSWD sudoers + keychain, not this net.
+_CMD_SECRET_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(--password[=\s])(\S+)"),
+    re.compile(r"(keychain://)(\S+)"),
+]
+
+
+def _redact_command(cmd: str) -> str:
+    """Mask the value of known secret-bearing forms in a command string."""
+    for pattern in _CMD_SECRET_PATTERNS:
+        cmd = pattern.sub(r"\1<redacted>", cmd)
+    return cmd
+
 
 @dataclass(slots=True)
 class _OpenFile:
@@ -118,7 +136,12 @@ class AuditLog:
         for k, v in fields.items():
             if k in _RESERVED:
                 continue
-            record[k] = "<redacted>" if k in SECRET_KEYS else v
+            if k in SECRET_KEYS:
+                record[k] = "<redacted>"
+            elif k == "cmd" and isinstance(v, str):
+                record[k] = _redact_command(v)
+            else:
+                record[k] = v
         return record
 
     def _write_locked(self, state: _HostState, host: str, record: dict[str, Any]) -> None:

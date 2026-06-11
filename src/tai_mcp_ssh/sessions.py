@@ -10,10 +10,11 @@ known interactive prompts (sudo, hostkey, apt-confirm, ...).
 from __future__ import annotations
 
 import asyncio
+import codecs
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -21,7 +22,7 @@ from ulid import ULID
 
 from tai_mcp_ssh.audit import AuditLog
 from tai_mcp_ssh.errors import HostUnreachable
-from tai_mcp_ssh.ssh import Connection, ConnectionPool, _as_str
+from tai_mcp_ssh.ssh import Connection, ConnectionPool
 
 _TMUX_PREFIX = "tai-mcp"
 
@@ -89,10 +90,17 @@ class _SessionState:
     command: str | None = None
     reason: str | None = None
     # Incremental-read cursor over the remote per-command log file.
-    # log_offset = number of bytes already pulled into log_buffer; each
-    # poll only fetches new bytes via `tail -c +<offset+1>`.
+    # log_offset = number of bytes already pulled; each poll fetches only the
+    # new bytes via `tail -c +<offset+1>` and feeds them through a stateful
+    # incremental decoder into log_text. Tracking the offset in raw bytes
+    # keeps it exact even for non-UTF-8 output, and the decoder buffers an
+    # incomplete trailing multibyte sequence until its continuation arrives —
+    # so we never re-decode the whole buffer per poll.
     log_offset: int = 0
-    log_buffer: str = ""
+    log_text: str = ""
+    log_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace")
+    )
     # Highest buffer index we've already searched for the DONE sentinel.
     # Next scan starts a small overlap behind this so a marker straddling
     # two chunks still matches.
@@ -171,7 +179,15 @@ class SessionManager:
                 state.started_at = self._now()
                 state.last_used_at = state.started_at
 
-                await self._send_command(conn, name, log_id, log_path, command)
+                try:
+                    await self._send_command(conn, name, log_id, log_path, command)
+                except Exception:
+                    # A failed send (e.g. tmux command returns non-zero because
+                    # the pane was killed externally) must not leave the session
+                    # wedged `busy`. Roll back to idle so the next call can reuse
+                    # it. HostUnreachable still propagates to _forget below.
+                    self._clear_state(state)
+                    raise
 
             return await self._poll(conn, state, timeout, tool="session_run")
         except HostUnreachable:
@@ -319,7 +335,7 @@ class SessionManager:
         assert state.log_id is not None
         assert state.log_path is not None
         log_id = state.log_id
-        done_re = re.compile(rf"^__TAI_DONE__(\d+)__{re.escape(log_id)}__\s*$", re.MULTILINE)
+        done_re = _done_re(log_id)
 
         call_start = self._now()
         # Marker is ~30 chars; 64 bytes of overlap is plenty to catch one
@@ -377,15 +393,23 @@ class SessionManager:
         """
         assert state.log_path is not None
         cmd = f"tail -c +{state.log_offset + 1} {shlex.quote(state.log_path)}"
-        result = await conn.run(cmd, check=False)
+        # encoding=None → raw bytes, so the offset advances by exactly the
+        # number of bytes read (re-encoding a lossy-decoded str would drift).
+        result = await conn.run(cmd, check=False, encoding=None)
         if result.exit_status != 0:
-            # File may not exist yet; return whatever we've buffered so far.
-            return state.log_buffer
-        chunk = _as_str(result.stdout)
-        if chunk:
-            state.log_buffer += chunk
-            state.log_offset += len(chunk.encode("utf-8"))
-        return state.log_buffer
+            # File may not exist yet; return whatever we've decoded so far.
+            return state.log_text
+        raw = result.stdout
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        elif raw is None:
+            raw = b""
+        if raw:
+            state.log_offset += len(raw)
+            # Decode only the new bytes; the decoder holds any split multibyte
+            # char until its continuation arrives on the next poll.
+            state.log_text += state.log_decoder.decode(raw)
+        return state.log_text
 
     def _attach_hint(self, state: _SessionState) -> str:
         return f"ssh {state.host} -t tmux attach -t {_TMUX_PREFIX}/{state.name}"
@@ -451,7 +475,8 @@ class SessionManager:
         state.started_at = None
         state.last_used_at = self._now()
         state.log_offset = 0
-        state.log_buffer = ""
+        state.log_text = ""
+        state.log_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         state.scan_pos = 0
 
     async def _audit_event(self, state: _SessionState, result: RunResult, *, tool: str) -> None:
@@ -481,10 +506,20 @@ def _iso(ts: datetime) -> str:
     return ts.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _done_re(log_id: str) -> re.Pattern[str]:
+    """Compiled DONE-sentinel matcher for ``log_id``.
+
+    Single source of truth shared by ``_poll`` (``.search`` over the whole
+    buffer) and ``_extract_output`` (``.match`` per line); ``re.MULTILINE`` is
+    inert for ``.match`` so the one pattern serves both.
+    """
+    return re.compile(rf"^__TAI_DONE__(\d+)__{re.escape(log_id)}__\s*$", re.MULTILINE)
+
+
 def _extract_output(content: str, log_id: str) -> str:
     """Output strictly between the START and DONE markers (exclusive)."""
     start_marker = f"__TAI_START__{log_id}__"
-    done_pattern = re.compile(rf"^__TAI_DONE__(\d+)__{re.escape(log_id)}__\s*$")
+    done_pattern = _done_re(log_id)
     lines = content.splitlines()
     start_idx: int | None = None
     end_idx: int | None = None

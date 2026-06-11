@@ -108,12 +108,18 @@ class Connection:
             raise RuntimeError(f"{self.alias}: home_dir not resolved (Connection not ready)")
         return self._home_dir
 
-    async def run(self, command: str, *, check: bool = False) -> asyncssh.SSHCompletedProcess:
-        """Execute a one-shot command. Use sessions.py for stateful operations."""
+    async def run(
+        self, command: str, *, check: bool = False, encoding: str | None = "utf-8"
+    ) -> asyncssh.SSHCompletedProcess:
+        """Execute a one-shot command. Use sessions.py for stateful operations.
+
+        ``encoding=None`` returns raw ``bytes`` stdout/stderr; callers that need
+        exact byte accounting (the session log reader) rely on this.
+        """
         if self._dead:
             raise HostUnreachable(f"{self.alias}: connection already dead")
         try:
-            return await self._conn.run(command, check=check)
+            return await self._conn.run(command, check=check, encoding=encoding)
         except DEAD_CONN_ERRORS as exc:
             self._dead = True
             raise HostUnreachable(f"{self.alias}: {exc}") from exc
@@ -156,6 +162,10 @@ class ConnectionPool:
         self._connections: dict[str, Connection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._ready: set[str] = set()
+        # Strong refs to in-flight fire-and-forget sweep tasks so the event
+        # loop doesn't garbage-collect them mid-run (only a weak ref is held
+        # otherwise). Each task removes itself on completion.
+        self._sweep_tasks: set[asyncio.Task[None]] = set()
 
     async def get(self, alias: str) -> Connection:
         """Return an open, bootstrap-checked :class:`Connection` for ``alias``.
@@ -312,8 +322,11 @@ class ConnectionPool:
         await conn.run(f"mkdir -p -m 0700 {_REMOTE_LOG_DIR}", check=True)
         await self._audit.record("_logdir_check", host=conn.alias, status="ok")
 
-        # 4. Best-effort remote-log retention sweep, fire-and-forget.
-        asyncio.create_task(self._sweep_remote_logs(conn, conn.host.log_retention_days))
+        # 4. Best-effort remote-log retention sweep, fire-and-forget. Keep a
+        # strong reference until the task finishes so it isn't GC'd mid-run.
+        task = asyncio.create_task(self._sweep_remote_logs(conn, conn.host.log_retention_days))
+        self._sweep_tasks.add(task)
+        task.add_done_callback(self._sweep_tasks.discard)
 
     async def _sweep_remote_logs(self, conn: Connection, retention_days: int) -> None:
         """Delete remote ``~/.tai-ssh/logs/*.log`` files older than ``retention_days``.
