@@ -111,100 +111,13 @@ The server speaks MCP over stdio. Configure your MCP client to launch it via `uv
 
 `uv --directory` tells uv to operate as if it were in that directory regardless of where the MCP client launches it from. Edits to the source are picked up on the next launch — no rebuild step.
 
-## The sudo handoff
+## Documentation
 
-When the LLM runs a command that needs a password, the MCP detects the prompt within milliseconds and returns something like:
+Deeper how-to guides live under [`docs/`](./docs/):
 
-```json
-{
-  "status": "needs_password",
-  "attach_hint": "ssh pi-living -t tmux attach -t tai-mcp/default",
-  "prompt": "[sudo] password for pi:"
-}
-```
-
-The LLM will tell you what to do. The flow:
-
-1. Run the `attach_hint` command in your own terminal.
-2. Type your sudo password into the live `tmux` pane.
-3. Detach with `Ctrl-B` then `D`.
-4. Tell the LLM to continue. It will call `session_wait` and pick up where it left off.
-
-**Tip**: for routine LLM admin work, configuring `NOPASSWD` `sudoers` entries for the specific commands you trust (e.g. `systemctl restart nginx`, `apt update`) sidesteps the handoff entirely and is more auditable.
-
-## Stage-and-move for root-owned files
-
-`put` runs as the SSH user, not root. To install a config file into `/etc/...`:
-
-```
-1. put("pi-living", "nginx.conf", "/tmp/nginx.conf.new")
-2. session_run("pi-living/default", "sudo mv /tmp/nginx.conf.new /etc/nginx/nginx.conf")
-```
-
-Both halves are independently audited.
-
-## Downloads confinement
-
-`get` writes under the downloads dir (`~/.local/state/tai-mcp-ssh/downloads/<host>/`)
-by default. A `local_path` that resolves outside that tree — after collapsing `..`
-and symlinks — is rejected before any connection is opened, so a download (whose
-bytes the remote host controls) cannot overwrite `~/.ssh/authorized_keys`, a crontab,
-or similar. To land a file elsewhere deliberately, pass `allow_outside: true`; the
-out-of-tree write is then permitted and audited as such.
-
-## Recommended: NOPASSWD sudoers for routine ops
-
-The sudo-handoff flow exists for ad-hoc commands, but for the small set of operations the LLM repeats often you can sidestep it entirely by granting `NOPASSWD` for those exact commands. Drop a file at `/etc/sudoers.d/tai-mcp` on each managed host (edit with `sudo visudo -f /etc/sudoers.d/tai-mcp`):
-
-```sudoers
-# Allow the SSH user to run a curated set of admin commands without a password.
-# Replace `pi` with your SSH user; tighten the list to what you actually trust.
-pi ALL=(root) NOPASSWD: /usr/bin/apt update
-pi ALL=(root) NOPASSWD: /usr/bin/apt-get update
-pi ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx
-pi ALL=(root) NOPASSWD: /usr/bin/systemctl status *
-pi ALL=(root) NOPASSWD: /usr/bin/journalctl *
-pi ALL=(root) NOPASSWD: /usr/bin/docker ps, /usr/bin/docker logs *
-```
-
-Two reasons to do this:
-
-- **Auditability**: the allowed commands are explicitly enumerated in `/etc/sudoers.d/tai-mcp`, so you and any human auditor can read off exactly what elevated power the LLM has.
-- **Smoothness**: those commands no longer trigger the `needs_password` handoff. The LLM just runs them.
-
-For everything else, the `tmux attach` handoff still works.
-
-## Audit log
-
-Every tool call writes one JSON line into a per-host, per-UTC-day file:
-
-- Linux: `~/.local/state/tai-mcp-ssh/audit/<host>/YYYY-MM-DD.jsonl`
-- macOS: `~/Library/Logs/tai-mcp-ssh/audit/<host>/YYYY-MM-DD.jsonl`
-
-Non-host events (MCP startup, allowlist rejections where the host alias isn't recognised, retention-sweep summaries) live under `audit/_system/`. Files older than 90 days are deleted on MCP startup; configurable via an `[audit] retention_days = N` section in `hosts.toml`.
-
-Inspect with:
-
-```sh
-uv run tai-mcp-ssh audit tail -n 20 --pretty
-uv run tai-mcp-ssh audit tail --host pi-living -n 100
-
-# or directly with shell tools
-tail -f ~/.local/state/tai-mcp-ssh/audit/pi-living/$(date -u +%F).jsonl | jq
-cat ~/.local/state/tai-mcp-ssh/audit/pi-living/*.jsonl | jq 'select(.exit != 0)'
-```
-
-Each line carries `ts`, `tool`, `host`, `session`, `cmd`, `exit`, `duration_ms`, `stdout_bytes`, `log_id`, the LLM's `reason` (if supplied), and `sha256` for file transfers.
-
-## Live observability
-
-Because every action happens in a named `tmux` pane, you can attach at any time and watch the LLM work:
-
-```sh
-ssh pi-living -t tmux attach -t tai-mcp/default
-```
-
-Detach with `Ctrl-B D`.
+- [The sudo handoff](./docs/sudo-handoff.md) — the `tmux attach` flow for interactive prompts, plus configuring `NOPASSWD` sudoers to avoid it for routine ops.
+- [File transfer](./docs/file-transfer.md) — staging root-owned files via `put` + `sudo mv`, and the downloads-dir confinement `get` enforces.
+- [Observability](./docs/observability.md) — the JSONL audit log and attaching to a live `tmux` pane to watch the LLM work.
 
 ## Project layout
 
@@ -218,8 +131,10 @@ src/tai_mcp_ssh/      Python package
   config.py           hosts.toml load/save
   audit.py            JSONL audit log
   paths.py            XDG / macOS path resolution
+  errors.py           shared exception types
 
 openspec/             change proposals and specs
+docs/                 how-to guides (sudo handoff, file transfer, observability)
 ```
 
 ## License
