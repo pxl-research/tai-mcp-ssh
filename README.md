@@ -91,7 +91,7 @@ uv run tai-mcp-ssh audit tail -n 20 --pretty
 
 ### Topology
 
-**The MCP and the human operator are assumed to be on the same machine or LAN as the managed host.** The sudo handoff asks you to `ssh <host> -t tmux attach -t tai-mcp/<name>` in a separate terminal, which requires you to reach the host directly. Running the MCP on a remote bastion while you sit elsewhere is out of scope for v1. If you need bastion-style operation, configure `NOPASSWD` sudoers for the commands the LLM uses so the handoff is rarely needed (see [docs/sudo-handoff.md](./docs/sudo-handoff.md)).
+**The MCP and the human operator are assumed to be on the same machine or LAN as the managed host.** The sudo handoff asks you to `ssh <host> -t tmux attach -t tai/<name>` in a separate terminal, which requires you to reach the host directly. Running the MCP on a remote bastion while you sit elsewhere is out of scope for v1. If you need bastion-style operation, configure `NOPASSWD` sudoers for the commands the LLM uses so the handoff is rarely needed (see [docs/sudo-handoff.md](./docs/sudo-handoff.md)).
 
 ## Documentation
 

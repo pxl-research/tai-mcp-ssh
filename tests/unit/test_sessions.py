@@ -160,6 +160,13 @@ def test_parse_session_id_rejects_unsafe_name() -> None:
         parse_session_id("pi/with space")
 
 
+def test_parse_session_id_rejects_dot_in_name() -> None:
+    # tmux rewrites `.` to `_` in session names and parses it as the
+    # window.pane separator in targets, so the session would be unreachable.
+    with pytest.raises(ValueError, match="no dots"):
+        parse_session_id("pi/foo.bar")
+
+
 def test_extract_output_strips_markers_and_prompt() -> None:
     content = _make_log("01J", output="hello\nworld")
     assert _extract_output(content, "01J") == "hello\nworld"
@@ -309,7 +316,7 @@ async def test_run_creates_tmux_session_idempotently(tmp_path: Path) -> None:
     # has-session check is part of the create command.
     create_calls = [c for c in fc.run_calls if "tmux has-session" in c]
     assert len(create_calls) == 1
-    assert "tmux new-session -d -s tai-mcp/default" in create_calls[0]
+    assert "tmux new-session -d -s tai/default" in create_calls[0]
     audit.close()
 
 
@@ -450,7 +457,7 @@ async def test_run_returns_needs_password_on_sudo_prompt(tmp_path: Path) -> None
     assert result.status == "needs_password"
     assert result.prompt is not None and result.prompt.startswith("[sudo]")
     assert result.attach_hint is not None
-    assert "tmux attach -t tai-mcp/default" in result.attach_hint
+    assert "tmux attach -t tai/default" in result.attach_hint
     audit.close()
 
 
@@ -597,7 +604,7 @@ async def test_kill_terminates_session_and_clears_state(tmp_path: Path) -> None:
     await sm.run("pi/default", "ok")
     result = await sm.kill("pi/default")
     assert result["killed"] is True
-    assert any("tmux kill-session -t tai-mcp/default" in c for c in fc.run_calls)
+    assert any("tmux kill-session -t tai/default" in c for c in fc.run_calls)
     assert sm.list_sessions() == []
 
     records = _audit_records(tmp_path, "pi")

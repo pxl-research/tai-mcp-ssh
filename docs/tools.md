@@ -15,7 +15,9 @@ The server speaks MCP over stdio and has no REST API. It exposes 8 tools. Each t
 
 ## Sessions
 
-A `session_id` has the form `<host>/<name>`, for example `pi-living/default`. The `name` part must match `[A-Za-z0-9._-]+`. The first `session_run` on a session creates a tmux session called `tai-mcp/<name>` on the remote host. If that tmux session survived a server restart, it is reused. Shell state (working directory, exported variables, activated virtualenvs, functions) persists between calls.
+A `session_id` has the form `<host>/<name>`, for example `pi-living/default`. The `name` part must match `[A-Za-z0-9_-]+`. The first `session_run` on a session creates a tmux session called `tai/<name>` on the remote host. If that tmux session survived a server restart, it is reused. Shell state (working directory, exported variables, activated virtualenvs, functions) persists between calls.
+
+Sessions stay open until they are killed. **The model using the server is responsible for closing sessions:** reuse `<host>/default` for routine work, and call `session_kill` on any other session once its task is finished. The server sends this guidance to the client as MCP server `instructions` when the client connects, and repeats it briefly in the `session_run` and `session_kill` descriptions.
 
 ## Run result
 

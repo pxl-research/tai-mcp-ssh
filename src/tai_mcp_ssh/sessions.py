@@ -1,7 +1,7 @@
 """tmux-backed remote sessions with sentinel completion and prompt detection.
 
 Composite session IDs ``<host>/<name>``. On first use a tmux session named
-``tai-mcp/<name>`` is created on the remote host. Each command is wrapped
+``tai/<name>`` is created on the remote host. Each command is wrapped
 with start/done markers; pane output is piped to
 ``~/.tai-ssh/logs/<log_id>.log`` and polled for the completion sentinel or
 known interactive prompts (sudo, hostkey, apt-confirm, ...).
@@ -24,12 +24,14 @@ from tai_mcp_ssh.audit import AuditLog
 from tai_mcp_ssh.errors import HostUnreachable
 from tai_mcp_ssh.ssh import Connection, ConnectionPool
 
-_TMUX_PREFIX = "tai-mcp"
+_TMUX_PREFIX = "tai"
 
 # Session names are interpolated into remote shell commands; restrict to a
 # safe character set so a session_id like `pi/foo;touch /tmp/pwned` can't
 # inject. Hosts are already constrained by the allowlist at the call site.
-_SAFE_SESSION_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+# No `.` either: tmux rewrites it to `_` in session names and treats it as the
+# window.pane separator in `-t` targets, so `foo.bar` would never resolve.
+_SAFE_SESSION_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Output-slice thresholds (per output-capture spec).
 _FULL_THRESHOLD_LINES = 50
@@ -116,8 +118,8 @@ def parse_session_id(session_id: str) -> tuple[str, str]:
         raise ValueError(f"Invalid session_id {session_id!r}: host and name must both be non-empty")
     if not _SAFE_SESSION_NAME.fullmatch(name):
         raise ValueError(
-            f"Invalid session_id {session_id!r}: name must match [A-Za-z0-9._-]+ "
-            f"(no shell metacharacters)"
+            f"Invalid session_id {session_id!r}: name must match [A-Za-z0-9_-]+ "
+            f"(no dots or shell metacharacters)"
         )
     return host, name
 

@@ -28,7 +28,7 @@ Every record contains `ts`, `tool`, and `host`. Other fields depend on the tool.
 Because every action happens in a named `tmux` pane, you can attach at any time and watch the LLM work:
 
 ```sh
-ssh pi-living -t tmux attach -t tai-mcp/default
+ssh pi-living -t tmux attach -t tai/default
 ```
 
 Detach with `Ctrl-B D`.

@@ -1,7 +1,7 @@
 # remote-sessions Specification
 
 ## Purpose
-Give the LLM long-lived shell sessions on managed hosts that survive across multiple tool calls. Each session is a named tmux session on the remote (`tai-mcp/<name>`), identified by a composite `<host>/<name>` ID and addressed via `session_run`, `session_wait`, `session_list`, and `session_kill`. tmux preserves cwd, environment, exported variables, function definitions, and any backgrounded children between calls — the foundation the LLM needs to drive a real interactive workflow. Completion is detected via per-command sentinels; known interactive prompts (sudo, hostkey, apt confirmations) are recognised at the pane tail so the LLM can hand off cleanly when human input is required; transport failures (peer reboot, network drop) are surfaced as a typed `host-unreachable` error and the next call transparently reconnects.
+Give the LLM long-lived shell sessions on managed hosts that survive across multiple tool calls. Each session is a named tmux session on the remote (`tai/<name>`), identified by a composite `<host>/<name>` ID and addressed via `session_run`, `session_wait`, `session_list`, and `session_kill`. tmux preserves cwd, environment, exported variables, function definitions, and any backgrounded children between calls — the foundation the LLM needs to drive a real interactive workflow. Completion is detected via per-command sentinels; known interactive prompts (sudo, hostkey, apt confirmations) are recognised at the pane tail so the LLM can hand off cleanly when human input is required; transport failures (peer reboot, network drop) are surfaced as a typed `host-unreachable` error and the next call transparently reconnects.
 ## Requirements
 ### Requirement: Composite session identifier
 Sessions SHALL be identified by a composite ID of the form `<host>/<name>`, where `<host>` matches an allowlist alias and `<name>` is a session label chosen by the LLM (default `"default"`). The host SHALL be derivable from the session ID without any additional lookup.
@@ -16,10 +16,10 @@ Sessions SHALL be identified by a composite ID of the form `<host>/<name>`, wher
 - **THEN** the tool call SHALL fail with a descriptive error
 
 ### Requirement: tmux-backed sessions auto-create on first use
-On the remote host, each session SHALL correspond to a tmux session named `tai-mcp/<name>`. If the named tmux session does not exist when `session_run` is invoked, the MCP SHALL create it before sending the command.
+On the remote host, each session SHALL correspond to a tmux session named `tai/<name>`. If the named tmux session does not exist when `session_run` is invoked, the MCP SHALL create it before sending the command.
 
 #### Scenario: First call to a new session
-- **WHEN** the LLM calls `session_run("pi-living/default", "pwd")` and no tmux session `tai-mcp/default` exists on `pi-living`
+- **WHEN** the LLM calls `session_run("pi-living/default", "pwd")` and no tmux session `tai/default` exists on `pi-living`
 - **THEN** the MCP SHALL create the tmux session and then send the command
 - **AND** the audit log entry SHALL reflect the session was newly created
 
@@ -47,7 +47,7 @@ While polling the pane for the completion sentinel, the MCP SHALL also detect kn
 #### Scenario: Sudo password prompt detected
 - **WHEN** the pane tail matches `[sudo] password for <user>:` or `Password:`
 - **THEN** the tool SHALL return `status: "needs_password"`
-- **AND** the response SHALL include `attach_hint` with a command of the form `ssh <host> -t tmux attach -t tai-mcp/<name>`
+- **AND** the response SHALL include `attach_hint` with a command of the form `ssh <host> -t tmux attach -t tai/<name>`
 - **AND** the response SHALL include the matched `prompt` string
 - **AND** the audit log entry SHALL record `needs_password: true`
 
@@ -97,7 +97,7 @@ The MCP SHALL expose `session_list()` returning all known active sessions across
 
 #### Scenario: session_kill terminates tmux session
 - **WHEN** the LLM calls `session_kill("pi-living/build")`
-- **THEN** the MCP SHALL execute the equivalent of `tmux kill-session -t tai-mcp/build` on `pi-living`
+- **THEN** the MCP SHALL execute the equivalent of `tmux kill-session -t tai/build` on `pi-living`
 - **AND** the action SHALL be audited
 - **AND** subsequent `session_run` calls to that session_id SHALL auto-create a fresh tmux session
 

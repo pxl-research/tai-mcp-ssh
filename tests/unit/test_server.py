@@ -19,8 +19,10 @@ from tai_mcp_ssh.audit import AuditLog
 from tai_mcp_ssh.config import AuditSettings, Config, Host
 from tai_mcp_ssh.errors import ConfigError, HostNotAllowed, TransferDenied
 from tai_mcp_ssh.server import (
+    SERVER_INSTRUCTIONS,
     Services,
     _dispatch_and_audit,
+    build_server,
     dispatch,
     to_jsonable,
     tool_specs,
@@ -54,6 +56,12 @@ def _make_services(
 # ---------------------------------------------------------------------------
 # Tool specs
 # ---------------------------------------------------------------------------
+
+
+def test_server_sends_session_hygiene_instructions(tmp_path: Path) -> None:
+    server = build_server(_make_services(tmp_path))
+    assert server.instructions == SERVER_INSTRUCTIONS
+    assert "session_kill" in SERVER_INSTRUCTIONS
 
 
 def test_tool_specs_returns_eight() -> None:
