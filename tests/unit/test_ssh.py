@@ -91,11 +91,11 @@ def _default_handler(command: str) -> FakeProcess:
 
 
 async def _flush_background_tasks() -> None:
-    """Let create_task'd sweeps run to completion before we assert audits."""
-    # asyncio.sleep(0) yields the loop; several yields lets the sweep
-    # run its single conn.run() + record() chain.
-    for _ in range(5):
-        await asyncio.sleep(0)
+    """Let create_task'd maintenance run to completion before we assert audits."""
+    # Await the tasks themselves: a fixed number of sleep(0) yields races the
+    # audit writes, which hop through a worker thread (asyncio.to_thread).
+    pending = asyncio.all_tasks() - {asyncio.current_task()}
+    await asyncio.wait_for(asyncio.gather(*pending), timeout=5)
 
 
 def _audit_records(audit_root: Path, host: str) -> list[dict[str, Any]]:
