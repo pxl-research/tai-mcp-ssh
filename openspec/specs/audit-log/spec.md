@@ -2,9 +2,11 @@
 
 ## Purpose
 Provide a durable, per-host, per-day JSONL record of every MCP tool invocation — including rejections and errors — so operators can later answer "what did the LLM do, on which host, with what outcome?" without re-running anything. The log is the system's forensic primitive: every call writes exactly one record, secrets never appear in any field, and the on-disk layout is greppable with standard tools.
+
 ## Requirements
+
 ### Requirement: Audit log directory layout
-The system SHALL store audit records under a per-host directory structure rooted at the state directory. On Linux the root SHALL be `$XDG_STATE_HOME/tai-mcp-ssh/audit/` when `XDG_STATE_HOME` is set, otherwise `~/.local/state/tai-mcp-ssh/audit/`. On macOS the root SHALL be `~/Library/Logs/tai-mcp-ssh/audit/`. Each managed host SHALL have its own subdirectory named after the allowlist alias (for example `audit/pi-living/`). Non-host events SHALL be written to a reserved `audit/_system/` subdirectory.
+The system SHALL store audit records in one subdirectory per managed host under the audit root (see "Audit log root location"). Each subdirectory SHALL be named after the allowlist alias (for example `audit/pi-living/`). Non-host events SHALL be written to a reserved `audit/_system/` subdirectory.
 
 #### Scenario: First write to a new host creates its folder
 - **WHEN** the MCP records its first audit event for `pi-living`
@@ -113,3 +115,15 @@ Every reload of `hosts.toml` triggered by a `hosts` MCP tool invocation SHALL pr
 - **WHEN** the LLM calls `hosts()` and `hosts.toml` cannot be parsed or fails validation
 - **THEN** a `_hosts_reload` record SHALL be appended with `"status": "error"` and a descriptive error field
 - **AND** the in-memory allowlist SHALL remain unchanged (per the host-inventory spec)
+
+### Requirement: Audit log root location
+The audit root SHALL be a platform-specific state directory. On Linux it SHALL be `$XDG_STATE_HOME/tai-mcp-ssh/audit/` when `XDG_STATE_HOME` is set, otherwise `~/.local/state/tai-mcp-ssh/audit/`. On macOS it SHALL be `~/Library/Logs/tai-mcp-ssh/audit/`.
+
+#### Scenario: Linux honours XDG_STATE_HOME
+- **WHEN** the MCP runs on Linux with `XDG_STATE_HOME=/data/state`
+- **THEN** audit records SHALL be written under `/data/state/tai-mcp-ssh/audit/`
+
+#### Scenario: macOS uses Library/Logs
+- **WHEN** the MCP runs on macOS
+- **THEN** audit records SHALL be written under `~/Library/Logs/tai-mcp-ssh/audit/`
+- **AND** `XDG_STATE_HOME` SHALL NOT affect the audit root

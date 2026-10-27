@@ -2,7 +2,9 @@
 
 ## Purpose
 Let the LLM move files between the operator's machine and managed hosts via SFTP-backed `put` / `get` tools that ride the existing SSH connection — no separate authentication, no separate allowlist. Privilege escalation is deliberately *not* part of the transfer path: a `put` to a root-owned destination fails cleanly with guidance to use the documented stage-and-move pattern (`put` to `/tmp`, then `session_run` with `sudo mv`), so any privileged write still goes through the audited session surface.
+
 ## Requirements
+
 ### Requirement: `put` and `get` use SFTP over the existing SSH connection
 The MCP SHALL expose `put(host, local_path, remote_path, reason?)` and `get(host, remote_path, local_path?, reason?)` tools that transfer files via SFTP over the same SSH connection used for sessions. No separate authentication SHALL be required.
 
@@ -17,15 +19,7 @@ The MCP SHALL expose `put(host, local_path, remote_path, reason?)` and `get(host
 - **AND** the response SHALL include `bytes`, `sha256`, and the actual `local_path`
 
 ### Requirement: `get` confines its local destination to the downloads directory
-`get` SHALL write the downloaded file only under the downloads directory
-(`paths.downloads_dir()`, i.e. `~/.local/state/tai-mcp-ssh/downloads/` or its macOS
-equivalent) unless the caller explicitly opts out. The destination SHALL be resolved
-(symlinks and `..` segments collapsed) and checked for containment **before** any
-SFTP connection is opened or any bytes are written. A resolved destination outside
-the downloads tree SHALL be rejected with a `TransferDenied` error unless the call
-sets `allow_outside = true`. The default destination
-(`downloads_dir(host)/<basename>` when `local_path` is omitted) and any `local_path`
-that resolves inside the downloads tree SHALL continue to work unchanged.
+`get` SHALL write the downloaded file only under the downloads directory (`paths.downloads_dir()`, i.e. `~/.local/state/tai-mcp-ssh/downloads/` or its macOS equivalent). The default destination (`downloads_dir(host)/<basename>` when `local_path` is omitted) and any `local_path` that resolves inside the downloads tree SHALL work. A destination that resolves outside the downloads tree SHALL be rejected with a `TransferDenied` error unless the call sets `allow_outside = true`.
 
 #### Scenario: Default destination is allowed
 - **WHEN** the LLM calls `get("pi-living", "/var/log/syslog")` with no `local_path`
@@ -75,3 +69,11 @@ For each successful `put` or `get`, the audit record SHALL include the byte coun
 - **WHEN** a `put` completes successfully
 - **THEN** the audit line for that call SHALL include `"sha256"` with the hex digest of the bytes written to the remote
 - **AND** the same digest SHALL be returned in the tool response
+
+### Requirement: `get` checks containment before any I/O
+`get` SHALL resolve the destination (symlinks and `..` segments collapsed) and check it for containment **before** any SFTP connection is opened or any bytes are written.
+
+#### Scenario: Escape via `..` or a symlink is caught
+- **WHEN** `local_path` is written inside the downloads tree but resolves outside it through `..` segments or a symlink
+- **THEN** the call SHALL be rejected as out-of-tree
+- **AND** no SFTP connection SHALL be opened and no local file SHALL be created or truncated
