@@ -2,10 +2,12 @@
 
 ## Audit log
 
-Every tool call writes one JSON line into a per-host, per-UTC-day file:
+Every tool call that acts on a host (and every rejected or failed call) writes one JSON line into a per-host, per-UTC-day file:
 
 - Linux: `~/.local/state/tai-mcp-ssh/audit/<host>/YYYY-MM-DD.jsonl`
 - macOS: `~/Library/Logs/tai-mcp-ssh/audit/<host>/YYYY-MM-DD.jsonl`
+
+Calls that only read local state, such as `session_list` or a `session_wait` on an idle session, are not recorded.
 
 Events that aren't tied to a host go under `audit/_system/`. These include `hosts.toml` reloads (`_hosts_reload`), audit-retention sweep summaries (`_sweep`), and rejections where no host could be determined. Audit files older than 90 days are deleted when the MCP server starts. You can change this with an `[audit] retention_days = N` section in `hosts.toml` (see [configuration.md](./configuration.md)).
 

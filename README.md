@@ -10,7 +10,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io) server that lets an 
 - Detects sudo prompts and other interactive prompts the LLM cannot answer. Hands off to you via `tmux attach`, then resumes once you detach.
 - `session_reset` recovers a wedged command without killing the pane; `session_kill` tears the pane down.
 - Tells the LLM to close the sessions it opens, and cleans up `tai/*` sessions left idle at a prompt for 48 hours (configurable).
-- Keeps a JSONL audit log of every tool call: command, exit code, byte count, and (optional) LLM-supplied reason.
+- Keeps a JSONL audit log of everything the LLM does on a host: command, exit code, byte count, and (optional) LLM-supplied reason.
 
 ## What it does NOT do
 

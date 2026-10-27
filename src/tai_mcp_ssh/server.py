@@ -7,8 +7,8 @@ the underlying managers (:class:`SessionManager`, :class:`TransferManager`,
 
 Audit records for ordinary calls are emitted by the managers themselves;
 this module only audits early rejections (allowlist miss, malformed
-session id, tmux missing, keychain unavailable) so every tool invocation
-still produces exactly one record.
+session id, tmux missing, keychain unavailable) and other failures, so
+every host action and every failed call produces exactly one record.
 """
 
 from __future__ import annotations
@@ -357,7 +357,7 @@ def _host_from_args(name: str, args: dict[str, Any]) -> str | None:
 
 
 async def _dispatch_and_audit(services: Services, name: str, args: dict[str, Any]) -> Any:
-    """Dispatch a tool call and ensure exactly one audit record per call.
+    """Dispatch a tool call; audit it exactly once if it is rejected or fails.
 
     Three failure modes:
 
