@@ -25,5 +25,5 @@
 
 ## 5. Wrap up
 
-- [ ] 5.1 Commit on a feature branch with a `FEAT:` message referencing issue #5.
-- [ ] 5.2 Open PR; on merge, `/opsx:archive add-session-reset` to sync the remote-sessions delta into the canonical specs.
+- [x] 5.1 Commit on a feature branch with a `FEAT:` message referencing issue #5.
+- [x] 5.2 Open PR; on merge, `/opsx:archive add-session-reset` to sync the remote-sessions delta into the canonical specs.
