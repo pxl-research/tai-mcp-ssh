@@ -1,7 +1,10 @@
 # Pre-commit hooks. After `uv sync`, activate with:
 #   uv run pre-commit install
+# That installs both the pre-commit hooks and the pre-push test run below.
 # Run manually against all files with:
 #   uv run pre-commit run --all-files
+
+default_install_hook_types: [pre-commit, pre-push]
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -37,3 +40,13 @@ repos:
         pass_filenames: false
         require_serial: true
         args: [src]
+
+      # Full test suite (with the coverage gate) before every push. This is
+      # the only test run; there is no hosted CI.
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

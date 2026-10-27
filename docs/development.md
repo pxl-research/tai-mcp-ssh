@@ -4,7 +4,7 @@
 
 ```sh
 uv sync                      # create .venv/ from uv.lock
-uv run pre-commit install    # run this once per clone
+uv run pre-commit install    # run this once per clone; installs commit and push hooks
 ```
 
 ## Common commands
@@ -28,11 +28,13 @@ Once you have run `pre-commit install`, every `git commit` runs these hooks:
 - `mypy`, run through `uv run mypy src` so it uses the same dependencies as your venv
 - hygiene checks: trailing whitespace, newline at end of file, TOML/YAML syntax, merge-conflict markers, large files (>500 KB), private SSH key detection, and line-ending normalisation
 
+Every `git push` also runs the full `pytest` suite with the coverage gate, and the push is aborted if it fails. To run it without pushing, use `uv run pre-commit run --hook-stage pre-push --all-files`.
+
 Hook versions are pinned in `.pre-commit-config.yaml`. To update them, run `uv run pre-commit autoupdate`.
 
-## CI
+## No hosted CI
 
-`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests. It runs `uv sync --frozen`, then all pre-commit hooks, then `pytest` with the coverage gate, on Python 3.11.
+There is no GitHub Actions workflow. The checks run on your machine instead: lint, format, mypy and hygiene on commit, and the test suite on push. Run `uv run pre-commit install` in every clone, or nothing is checked.
 
 ## Spec-driven changes (OpenSpec)
 

@@ -15,11 +15,13 @@ uv run pytest                                   # full suite; enforces --cov-fai
 uv run pytest tests/unit/test_sessions.py::test_name --no-cov   # single test, skip coverage gate
 uv run ruff check . && uv run ruff format .     # lint + format (line length 100)
 uv run mypy src                                 # strict mode
-uv run pre-commit run --all-files               # what CI runs (ruff, ruff-format, mypy, hygiene), then pytest
+uv run pre-commit run --all-files               # commit hooks: ruff, ruff-format, mypy, hygiene
 uv run tai-mcp-ssh serve                        # start MCP server on stdio
 uv run tai-mcp-ssh hosts add|list|remove|test <alias>
 uv run tai-mcp-ssh audit tail
 ```
+
+There is no hosted CI. `uv run pre-commit install` installs both the commit hooks and a pre-push hook that runs the full `pytest` suite.
 
 When you run a subset of tests, pass `--no-cov`. Otherwise the 85% coverage gate fails the run.
 

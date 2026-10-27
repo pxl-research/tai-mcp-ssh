@@ -100,7 +100,7 @@ uv run tai-mcp-ssh audit tail -n 20 --pretty
 - [The sudo handoff](./docs/sudo-handoff.md) — the `tmux attach` flow for interactive prompts, plus `NOPASSWD` sudoers for routine ops.
 - [File transfer](./docs/file-transfer.md) — staging root-owned files via `put` + `sudo mv`, and the downloads-dir confinement `get` enforces.
 - [Observability](./docs/observability.md) — the JSONL audit log and attaching to a live `tmux` pane to watch the LLM work.
-- [Development](./docs/development.md) — tests, linting, pre-commit, CI, and the OpenSpec workflow.
+- [Development](./docs/development.md) — tests, linting, pre-commit and pre-push hooks, and the OpenSpec workflow.
 
 The behavioural contract lives under `openspec/specs/` (one capability per directory). In-flight changes — proposed but not yet promoted into the canonical specs — live under `openspec/changes/`.
 
