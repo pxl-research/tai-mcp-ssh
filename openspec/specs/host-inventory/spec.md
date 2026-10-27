@@ -2,7 +2,9 @@
 
 ## Purpose
 Define which hosts the LLM is allowed to reach and how to authenticate to each. A single TOML file (`~/.config/tai-mcp-ssh/hosts.toml`) names each reachable host by alias, mirrors what `~/.ssh/config` already knows where possible, and bars plaintext secrets — passwords must live in the OS keychain referenced by `keychain://tai-mcp-ssh/<alias>` URIs. The allowlist is the system's only gate on which machines the LLM can touch; every other capability (sessions, transfer) defers to it.
+
 ## Requirements
+
 ### Requirement: Allowlist file location and format
 The system SHALL read the set of LLM-reachable hosts from a TOML file at `~/.config/tai-mcp-ssh/hosts.toml`. Only hosts present in this file SHALL be addressable by MCP tools.
 
@@ -43,19 +45,32 @@ The system SHALL NOT accept passwords or other secrets as values in `hosts.toml`
 - **THEN** the MCP SHALL refuse to start (in `serve` mode) or emit a hard error (in CLI commands)
 - **AND** the error message SHALL instruct the user to move the secret to the keychain
 
-### Requirement: `hosts()` MCP tool surface
-The MCP server SHALL expose a `hosts()` tool that returns the configured allowlist with secrets redacted. The tool SHALL reload `hosts.toml` from disk on every invocation so that aliases added, removed, or modified in the file while the MCP is running are visible to the LLM without restarting the server. The reload SHALL atomically swap the in-memory allowlist and evict cached SSH connections for aliases that were removed or whose connection parameters changed; cached connections for unchanged aliases SHALL be preserved.
+### Requirement: `hosts()` lists the allowlist with secrets redacted
+The MCP server SHALL expose a `hosts()` tool that returns the configured allowlist with secrets redacted.
 
 #### Scenario: hosts() lists entries
 - **WHEN** the LLM calls `hosts()`
 - **THEN** the tool SHALL return an array of objects with fields `alias`, `host`, `user`, `port`, `auth`
 - **AND** no field whose name or value contains a password or keychain reference SHALL be included
 
+### Requirement: `hosts()` reloads `hosts.toml` on every call
+The `hosts()` tool SHALL reload `hosts.toml` from disk on every invocation, so that aliases added, removed, or modified in the file while the MCP is running are visible to the LLM without restarting the server. A reload that fails validation SHALL leave the running allowlist unchanged.
+
 #### Scenario: Newly added host visible without restart
 - **WHEN** the operator runs `tai-mcp-ssh hosts add new-vps` while the MCP is serving
 - **AND** the LLM subsequently calls `hosts()`
 - **THEN** the response SHALL include `new-vps` in the returned list
 - **AND** a subsequent `session_run("new-vps/default", ...)` SHALL NOT raise `HostNotAllowed`
+
+#### Scenario: Malformed hosts.toml does not clear the running allowlist
+- **WHEN** `hosts.toml` is edited to introduce a parse error, a forbidden key, or other validation failure
+- **AND** the LLM subsequently calls `hosts()`
+- **THEN** the running allowlist SHALL remain unchanged (no aliases are silently dropped)
+- **AND** the reload failure SHALL be recorded in the audit log
+- **AND** the `hosts()` response SHALL reflect the previously valid allowlist
+
+### Requirement: Reload evicts only affected connections
+A successful reload SHALL atomically swap the in-memory allowlist and evict cached SSH connections for aliases that were removed or whose connection parameters changed. Cached connections for unchanged aliases SHALL be preserved.
 
 #### Scenario: Removed host evicted from connection pool
 - **WHEN** an alias that previously had an open cached SSH connection is removed from `hosts.toml`
@@ -69,13 +84,6 @@ The MCP server SHALL expose a `hosts()` tool that returns the configured allowli
 - **AND** the LLM subsequently calls `hosts()`
 - **THEN** the cached connection for that alias SHALL be closed and dropped
 - **AND** the next tool call against that alias SHALL open a fresh connection using the new parameters
-
-#### Scenario: Malformed hosts.toml does not clear the running allowlist
-- **WHEN** `hosts.toml` is edited to introduce a parse error, a forbidden key, or other validation failure
-- **AND** the LLM subsequently calls `hosts()`
-- **THEN** the running allowlist SHALL remain unchanged (no aliases are silently dropped)
-- **AND** the reload failure SHALL be recorded in the audit log
-- **AND** the `hosts()` response SHALL reflect the previously valid allowlist
 
 #### Scenario: In-flight calls not disturbed by a concurrent reload
 - **WHEN** a long-running `session_run` against alias `pi` is in flight
