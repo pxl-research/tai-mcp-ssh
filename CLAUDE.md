@@ -15,11 +15,13 @@ uv run pytest                                   # full suite; enforces --cov-fai
 uv run pytest tests/unit/test_sessions.py::test_name --no-cov   # single test, skip coverage gate
 uv run ruff check . && uv run ruff format .     # lint + format (line length 100)
 uv run mypy src                                 # strict mode
-uv run pre-commit run --all-files               # what CI runs (ruff, ruff-format, mypy, hygiene), then pytest
+uv run pre-commit run --all-files               # commit hooks: ruff, ruff-format, mypy, hygiene
 uv run tai-mcp-ssh serve                        # start MCP server on stdio
 uv run tai-mcp-ssh hosts add|list|remove|test <alias>
 uv run tai-mcp-ssh audit tail
 ```
+
+There is no hosted CI. `uv run pre-commit install` installs both the commit hooks and a pre-push hook that runs the full `pytest` suite.
 
 When you run a subset of tests, pass `--no-cov`. Otherwise the 85% coverage gate fails the run.
 
@@ -46,8 +48,8 @@ Layering, from outermost to innermost:
 - **`server.py`**: thin MCP wiring around a `Services` bundle that holds config, audit, pool, and managers (all injectable for tests). `tool_specs()` defines the 8 tools. Keep tool descriptions terse because they are sent on every LLM turn. `dispatch()` routes calls to the managers. The `hosts` tool re-reads `hosts.toml` on each call (`reload_hosts_from_disk`). If the file is malformed, it keeps the old in-memory allowlist and evicts pooled connections for hosts that were removed or changed.
 - **Audit invariant: every tool call produces exactly one audit record.** Managers record ordinary outcomes themselves. `_dispatch_and_audit` records early rejections (`HostNotAllowed`, `TmuxMissing`, `KeychainUnavailable`) as `rejected` and any other exception as `error`. If a manager has already written a richer record before raising, it sets `exc.audited = True` to suppress the duplicate. Internal events use `_`-prefixed tool names (`_session_create`, `_tmux_check`, `_hosts_reload`, `_remote_sweep`). Audit files are written to `<audit_dir>/<host>/<UTC-date>.jsonl`, and secret-looking keys are scrubbed.
 - **`sessions.py`**:
-  - **Session IDs and tmux targets.** Session IDs have the form `<host>/<name>` and map to the remote tmux session `tai-mcp/<name>`. `name` is restricted to `[A-Za-z0-9._-]+` because it is interpolated into shell commands.
-  - **Command wrapping.** Each run wraps the command as `echo __TAI_START__<ulid>__; eval '<cmd>'; printf '\n__TAI_DONE__%d__<ulid>__\n' "$?"`. It points `tmux pipe-pane` at `~/.tai-ssh/logs/<ulid>.log` and sends the wrapped command with `send-keys -l`. `eval` keeps cd/export/source effects in the persistent shell. The leading `\n` keeps the DONE marker at column 0.
+  - **Session IDs and tmux targets.** Session IDs have the form `<host>/<name>` and map to the remote tmux session `tai/<name>`. `name` is restricted to `[A-Za-z0-9_-]+` because it is interpolated into shell commands. Always target tmux with the exact-match helpers (`=tai/<name>`, `=tai/<name>:` for panes). A bare `-t tai/foo` falls back to prefix matching and can hit `tai/foobar`.
+  - **Command wrapping.** Each run wraps the command as `echo __TAI_START__<ulid>__; eval '<cmd>'; printf '\n__TAI_DONE__%d__<ulid>__\n' "$?"`. Before every command, the first round trip ensures the tmux session exists (`has-session || new-session`, which echoes `__TAI_CREATED__` so `_session_create` is audited). A session killed outside `session_kill` therefore heals itself. That round trip then points `tmux pipe-pane` at `~/.tai-ssh/logs/<ulid>.log` and sends the wrapped command with `send-keys -l`. `eval` keeps cd/export/source effects in the persistent shell. The leading `\n` keeps the DONE marker at column 0.
   - **Polling.** `_poll` reads the log incrementally (`tail -c +offset` plus a stateful UTF-8 decoder), and each poll scans only the newly read text. Its checks run in this order:
     1. The DONE sentinel, which is the only trusted completion signal.
     2. Prompt patterns anchored at the end of the buffer, which return `needs_password` or `needs_input` with an `attach_hint`.
@@ -56,7 +58,8 @@ Layering, from outermost to innermost:
   - **Locks.** Each session has its own `asyncio.Lock`, and locks are never removed. Read session state *under* the lock to avoid TOCTOU races.
 - **`ssh.py`**:
   - **Connection lifecycle.** The pool opens one cached connection per host alias, lazily and under a per-alias lock. It evicts a connection that `Connection.run` marked dead after a transport error (`DEAD_CONN_ERRORS` → `HostUnreachable`), so the next call reconnects.
-  - **First-connect bootstrap.** On first connect the pool checks that tmux exists, resolves `$HOME`, runs `mkdir ~/.tai-ssh/logs`, and starts a fire-and-forget sweep of old remote logs.
+  - **First-connect bootstrap.** On first connect the pool checks that tmux exists, resolves `$HOME`, and runs `mkdir ~/.tai-ssh/logs`.
+  - **Background maintenance.** `get()` schedules a fire-and-forget `_maintain` task at most once per hour per host (throttled with a monotonic clock that survives eviction). The task sweeps old remote logs and reaps idle `tai/*`/`tai-mcp/*` sessions (`select_idle_sessions` + a `pgrep` guard against background children). Each step audits its own failures and never raises.
   - **Connect targets and passwords.** The host alias is passed as the asyncssh connect target so `~/.ssh/config` applies. Password auth resolves `keychain://<service>/<account>` through `keyring` at connect time only.
 - **`config.py`**: loads `hosts.toml` (`~/.config/tai-mcp-ssh/`, XDG-aware). Keys like `password`, `token`, or `secret` at any nesting depth are rejected. A missing file means an empty allowlist.
 - **`transfer.py`**: SFTP put/get runs as the SSH user and streams a sha256. `get` is confined to the downloads directory unless `allow_outside` is set. A permission failure on `put` raises `TransferDenied` with a stage-and-move hint (`put` to /tmp, then `sudo mv`).

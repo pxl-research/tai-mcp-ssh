@@ -27,6 +27,7 @@ FORBIDDEN_KEYS: frozenset[str] = frozenset(
 DEFAULT_PORT = 22
 DEFAULT_LOG_RETENTION_DAYS = 7  # remote ~/.tai-ssh/logs/ retention per host
 DEFAULT_AUDIT_RETENTION_DAYS = 90
+DEFAULT_SESSION_IDLE_TIMEOUT_HOURS = 48  # 0 disables idle-session reaping
 
 Auth = Literal["key", "password"]
 
@@ -51,9 +52,17 @@ class AuditSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionSettings:
+    """Global (not per-host) settings for remote tmux sessions."""
+
+    idle_timeout_hours: int = DEFAULT_SESSION_IDLE_TIMEOUT_HOURS
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     hosts: dict[str, Host]
     audit: AuditSettings
+    sessions: SessionSettings = SessionSettings()
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -87,7 +96,18 @@ def load_config(path: Path | None = None) -> Config:
         retention_days=int(audit_table.get("retention_days", DEFAULT_AUDIT_RETENTION_DAYS)),
     )
 
-    return Config(hosts=hosts, audit=audit)
+    sessions_table = raw.get("sessions", {}) or {}
+    if not isinstance(sessions_table, dict):
+        raise ConfigError(f"{p}: [sessions] must be a table")
+    idle = sessions_table.get("idle_timeout_hours", DEFAULT_SESSION_IDLE_TIMEOUT_HOURS)
+    # bool is an int subclass; `idle_timeout_hours = true` is a typo, not 1.
+    if isinstance(idle, bool) or not isinstance(idle, int) or idle < 0:
+        raise ConfigError(
+            f"{p}: [sessions].idle_timeout_hours must be a non-negative integer "
+            f"(0 disables idle-session reaping), got {idle!r}"
+        )
+
+    return Config(hosts=hosts, audit=audit, sessions=SessionSettings(idle_timeout_hours=idle))
 
 
 def save_host(host: Host, path: Path | None = None) -> None:

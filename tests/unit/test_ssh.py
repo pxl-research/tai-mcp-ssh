@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -25,7 +26,7 @@ from tai_mcp_ssh.errors import (
     KeychainUnavailable,
     TmuxMissing,
 )
-from tai_mcp_ssh.ssh import ConnectionPool
+from tai_mcp_ssh.ssh import ConnectionPool, _kill_command, select_idle_sessions
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -90,11 +91,11 @@ def _default_handler(command: str) -> FakeProcess:
 
 
 async def _flush_background_tasks() -> None:
-    """Let create_task'd sweeps run to completion before we assert audits."""
-    # asyncio.sleep(0) yields the loop; several yields lets the sweep
-    # run its single conn.run() + record() chain.
-    for _ in range(5):
-        await asyncio.sleep(0)
+    """Let create_task'd maintenance run to completion before we assert audits."""
+    # Await the tasks themselves: a fixed number of sleep(0) yields races the
+    # audit writes, which hop through a worker thread (asyncio.to_thread).
+    pending = asyncio.all_tasks() - {asyncio.current_task()}
+    await asyncio.wait_for(asyncio.gather(*pending), timeout=5)
 
 
 def _audit_records(audit_root: Path, host: str) -> list[dict[str, Any]]:
@@ -587,4 +588,277 @@ async def test_update_hosts_changed_params_evicts_and_reopens(tmp_path: Path) ->
     await pool.get("pi")
     assert len(factory.connect_calls) == 2
     assert factory.connect_calls[1]["host"] == "10.0.0.5"
+    audit.close()
+
+
+# ---------------------------------------------------------------------------
+# Throttled per-host maintenance
+# ---------------------------------------------------------------------------
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _sweep_runs(factory: FakeConnectFactory) -> int:
+    return sum(1 for c in factory.connections for cmd in c.run_calls if "-delete -print" in cmd)
+
+
+def _throttled_pool(tmp_path: Path) -> tuple[ConnectionPool, FakeConnectFactory, FakeClock]:
+    factory = FakeConnectFactory(run_handler=_default_handler)
+    clock = FakeClock()
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi", host="192.168.1.42")},
+        audit=AuditLog(root=tmp_path),
+        connect=factory,
+        monotonic=clock,
+    )
+    return pool, factory, clock
+
+
+async def test_maintenance_runs_on_first_get_then_hourly(tmp_path: Path) -> None:
+    pool, factory, clock = _throttled_pool(tmp_path)
+
+    await pool.get("pi")
+    await _flush_background_tasks()
+    assert _sweep_runs(factory) == 1
+
+    clock.now += 3599
+    await pool.get("pi")
+    await _flush_background_tasks()
+    assert _sweep_runs(factory) == 1  # still within the hour
+
+    clock.now += 1
+    await pool.get("pi")
+    await _flush_background_tasks()
+    assert _sweep_runs(factory) == 2
+    await pool.close_all()
+
+
+async def test_maintenance_not_doubled_by_concurrent_gets(tmp_path: Path) -> None:
+    pool, factory, _clock = _throttled_pool(tmp_path)
+
+    await asyncio.gather(pool.get("pi"), pool.get("pi"), pool.get("pi"))
+    await _flush_background_tasks()
+    assert _sweep_runs(factory) == 1
+    await pool.close_all()
+
+
+async def test_maintenance_throttle_survives_eviction(tmp_path: Path) -> None:
+    pool, factory, clock = _throttled_pool(tmp_path)
+
+    conn = await pool.get("pi")
+    await _flush_background_tasks()
+    conn.mark_dead()
+    clock.now += 60
+
+    fresh = await pool.get("pi")  # reconnects after eviction
+    await _flush_background_tasks()
+    assert fresh is not conn
+    assert len(factory.connect_calls) == 2
+    assert _sweep_runs(factory) == 1  # reconnect did not re-trigger maintenance
+    await pool.close_all()
+
+
+async def test_maintenance_reaps_even_when_log_sweep_fails(tmp_path: Path) -> None:
+    def handler(command: str) -> FakeProcess:
+        if "-delete -print" in command:
+            raise RuntimeError("find exploded")
+        return _default_handler(command)
+
+    audit = AuditLog(root=tmp_path)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi", host="192.168.1.42")},
+        audit=audit,
+        connect=FakeConnectFactory(run_handler=handler),
+    )
+    await pool.get("pi")
+    await _flush_background_tasks()
+
+    records = _audit_records(tmp_path, "pi")
+    sweeps = [r for r in records if r["tool"] == "_remote_sweep"]
+    reaps = [r for r in records if r["tool"] == "_session_sweep"]
+    assert sweeps and sweeps[0]["status"] == "error"
+    assert reaps and reaps[0]["status"] == "ok"
+    await pool.close_all()
+    audit.close()
+
+
+# ---------------------------------------------------------------------------
+# Idle-session reaping
+# ---------------------------------------------------------------------------
+
+_NOW = 1_000_000
+_H = 3600
+
+
+def _row(name: str, attached: int, idle_h: float, cmd: str, pid: int) -> str:
+    return f"{name}\t{attached}\t{int(_NOW - idle_h * _H)}\t{cmd}\t{pid}"
+
+
+def _listing(*rows: str) -> str:
+    return "\n".join([str(_NOW), *rows]) + "\n"
+
+
+def test_select_idle_sessions_applies_every_keep_rule() -> None:
+    listing = _listing(
+        _row("tai/stale", 0, 50, "bash", 101),  # reaped
+        _row("tai-mcp/default", 0, 50, "-bash", 102),  # legacy prefix + login shell
+        _row("tai/sync", 0, 50, "rsync", 103),  # quiet long-running job
+        _row("tai/handoff", 0, 50, "sudo", 104),  # pending sudo handoff
+        _row("tai/watched", 1, 50, "bash", 105),  # attached
+        _row("work", 0, 50, "bash", 106),  # not ours
+        _row("tai/fresh", 0, 1, "zsh", 107),  # recently active
+        _row("tai/split", 0, 50, "bash", 108),  # one busy pane keeps it
+        _row("tai/split", 0, 50, "vim", 109),
+        _row("tai/both", 0, 50, "bash", 110),  # all panes idle
+        _row("tai/both", 0, 50, "fish", 111),
+        "tai/garbage\tnot-a-number\t1\tbash\t1",  # malformed: ignored
+        "short\trow",
+    )
+    assert select_idle_sessions(listing, 48) == [
+        ("tai/stale", [101]),
+        ("tai-mcp/default", [102]),
+        ("tai/both", [110, 111]),
+    ]
+
+
+def test_select_idle_sessions_handles_empty_and_bad_clock() -> None:
+    assert select_idle_sessions("", 48) == []
+    assert select_idle_sessions("not-a-clock\n" + _row("tai/x", 0, 50, "bash", 1), 48) == []
+    assert select_idle_sessions(_listing(), 48) == []
+
+
+def test_kill_command_only_kills_sessions_without_children() -> None:
+    # Run the generated line in a real shell with fake pgrep/tmux. pgrep -P
+    # exits 1 for "no children", 0 for "found", anything else for errors.
+    cmd = _kill_command([("tai/a", [11]), ("tai/b", [21, 22]), ("tai/c d", [31])])
+    prelude = (
+        'pgrep() { case "$2" in 11|21|31) return 1;; 22) return 0;; esac; return 2; }; '
+        'tmux() { echo "$@" >&2; }; '
+    )
+    out = subprocess.run(["sh", "-c", prelude + cmd], capture_output=True, text=True, check=False)
+    assert out.stdout.splitlines() == ["tai/a", "tai/c d"]  # tai/b has a child (pid 22)
+    assert "kill-session -t =tai/a" in out.stderr
+    assert "kill-session -t =tai/c d" in out.stderr  # quoted name survives intact
+    assert "=tai/b" not in out.stderr
+
+
+def test_kill_command_skips_when_pgrep_missing() -> None:
+    cmd = _kill_command([("tai/a", [11])])
+    out = subprocess.run(
+        ["sh", "-c", "pgrep() { return 127; }; tmux() { :; }; " + cmd],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.stdout == ""
+
+
+def _reaper_pool(
+    tmp_path: Path, handler: Callable[[str], FakeProcess], *, idle_timeout_hours: int = 48
+) -> tuple[ConnectionPool, FakeConnectFactory, AuditLog]:
+    def full_handler(command: str) -> FakeProcess:
+        if "tmux list-panes" in command or "kill-session" in command:
+            return handler(command)
+        return _default_handler(command)
+
+    factory = FakeConnectFactory(run_handler=full_handler)
+    audit = AuditLog(root=tmp_path)
+    pool = ConnectionPool(
+        hosts={"pi": Host(alias="pi", host="192.168.1.42")},
+        audit=audit,
+        connect=factory,
+        idle_timeout_hours=idle_timeout_hours,
+    )
+    return pool, factory, audit
+
+
+def _session_sweeps(tmp_path: Path) -> list[dict[str, Any]]:
+    return [r for r in _audit_records(tmp_path, "pi") if r["tool"] == "_session_sweep"]
+
+
+async def test_reaper_kills_candidates_and_audits_killed_names(tmp_path: Path) -> None:
+    def handler(command: str) -> FakeProcess:
+        if "tmux list-panes" in command:
+            return FakeProcess(
+                0,
+                _listing(_row("tai/stale", 0, 50, "bash", 1), _row("tai/sync", 0, 50, "rsync", 2)),
+            )
+        # Only names we asked to kill are reported, even if stdout has noise.
+        return FakeProcess(0, "tai/stale\nunrelated\n")
+
+    pool, factory, audit = _reaper_pool(tmp_path, handler)
+    await pool.get("pi")
+    await _flush_background_tasks()
+
+    calls = factory.connections[0].run_calls
+    kill = next(c for c in calls if "kill-session" in c)
+    assert "=tai/stale" in kill and "tai/sync" not in kill
+    sweeps = _session_sweeps(tmp_path)
+    assert sweeps == [
+        {**sweeps[0], "status": "ok", "killed": ["tai/stale"], "idle_timeout_hours": 48}
+    ]
+    await pool.close_all()
+    audit.close()
+
+
+async def test_reaper_nothing_to_reap_uses_one_round_trip(tmp_path: Path) -> None:
+    def handler(_command: str) -> FakeProcess:
+        return FakeProcess(0, _listing(_row("tai/fresh", 0, 1, "bash", 1)))
+
+    pool, factory, audit = _reaper_pool(tmp_path, handler)
+    await pool.get("pi")
+    await _flush_background_tasks()
+
+    assert not any("kill-session" in c for c in factory.connections[0].run_calls)
+    assert _session_sweeps(tmp_path)[0]["killed"] == []
+    await pool.close_all()
+    audit.close()
+
+
+async def test_reaper_treats_no_tmux_server_as_no_sessions(tmp_path: Path) -> None:
+    def handler(_command: str) -> FakeProcess:
+        return FakeProcess(1, f"{_NOW}\n", "no server running on /tmp/tmux-1000/default\n")
+
+    pool, _factory, audit = _reaper_pool(tmp_path, handler)
+    await pool.get("pi")
+    await _flush_background_tasks()
+
+    sweeps = _session_sweeps(tmp_path)
+    assert sweeps[0]["status"] == "ok" and sweeps[0]["killed"] == []
+    await pool.close_all()
+    audit.close()
+
+
+async def test_reaper_failure_is_audited_not_raised(tmp_path: Path) -> None:
+    def handler(_command: str) -> FakeProcess:
+        return FakeProcess(1, "", "tmux: unknown option -- Z\n")
+
+    pool, _factory, audit = _reaper_pool(tmp_path, handler)
+    conn = await pool.get("pi")  # must not raise
+    await _flush_background_tasks()
+
+    assert conn is not None
+    sweeps = _session_sweeps(tmp_path)
+    assert sweeps[0]["status"] == "error"
+    assert "unknown option" in sweeps[0]["error"]
+    await pool.close_all()
+    audit.close()
+
+
+async def test_reaper_disabled_with_zero_timeout(tmp_path: Path) -> None:
+    pool, factory, audit = _reaper_pool(
+        tmp_path, lambda _c: FakeProcess(0, ""), idle_timeout_hours=0
+    )
+    await pool.get("pi")
+    await _flush_background_tasks()
+
+    assert not any("tmux list-panes" in c for c in factory.connections[0].run_calls)
+    assert _session_sweeps(tmp_path) == []
+    await pool.close_all()
     audit.close()

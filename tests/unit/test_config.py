@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from tai_mcp_ssh.config import (
     AuditSettings,
     Host,
+    SessionSettings,
     delete_host,
     load_config,
     save_host,
@@ -170,6 +172,47 @@ host = "h"
     )
     cfg = load_config(p)
     assert cfg.audit.retention_days == 30
+
+
+def test_session_settings_default(tmp_path: Path) -> None:
+    p = tmp_path / "hosts.toml"
+    p.write_text("[hosts.pi]\n", encoding="utf-8")
+    assert load_config(p).sessions == SessionSettings(idle_timeout_hours=48)
+    assert load_config(tmp_path / "missing.toml").sessions.idle_timeout_hours == 48
+
+
+@pytest.mark.parametrize("value", [24, 0])
+def test_session_settings_custom(tmp_path: Path, value: int) -> None:
+    p = tmp_path / "hosts.toml"
+    p.write_text(f"[sessions]\nidle_timeout_hours = {value}\n", encoding="utf-8")
+    assert load_config(p).sessions.idle_timeout_hours == value
+
+
+@pytest.mark.parametrize("value", ["-1", '"48"', "true", "1.5"])
+def test_session_settings_rejects_bad_values(tmp_path: Path, value: str) -> None:
+    p = tmp_path / "hosts.toml"
+    p.write_text(f"[sessions]\nidle_timeout_hours = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="idle_timeout_hours"):
+        load_config(p)
+
+
+def test_session_settings_rejects_non_table(tmp_path: Path) -> None:
+    p = tmp_path / "hosts.toml"
+    p.write_text("sessions = 5\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=r"\[sessions\] must be a table"):
+        load_config(p)
+
+
+def test_documented_example_parses(tmp_path: Path) -> None:
+    # Guard against docs/configuration.md drifting from what load_config accepts.
+    doc = Path(__file__).parents[2] / "docs" / "configuration.md"
+    snippet = re.search(r"```toml\n(.*?)```", doc.read_text(encoding="utf-8"), re.DOTALL)
+    assert snippet is not None
+    p = tmp_path / "hosts.toml"
+    p.write_text(snippet.group(1), encoding="utf-8")
+    cfg = load_config(p)
+    assert set(cfg.hosts) == {"pi-living", "vps", "lab-box"}
+    assert cfg.sessions.idle_timeout_hours == 48
 
 
 def test_save_host_roundtrip(tmp_path: Path) -> None:

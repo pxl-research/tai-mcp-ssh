@@ -91,7 +91,7 @@ uv run tai-mcp-ssh audit tail -n 20 --pretty
 
 ### Topology
 
-**The MCP and the human operator are assumed to be on the same machine or LAN as the managed host.** The sudo handoff asks you to `ssh <host> -t tmux attach -t tai-mcp/<name>` in a separate terminal, which requires you to reach the host directly. Running the MCP on a remote bastion while you sit elsewhere is out of scope for v1. If you need bastion-style operation, configure `NOPASSWD` sudoers for the commands the LLM uses so the handoff is rarely needed (see [docs/sudo-handoff.md](./docs/sudo-handoff.md)).
+**The MCP and the human operator are assumed to be on the same machine or LAN as the managed host.** The sudo handoff asks you to `ssh <host> -t tmux attach -t tai/<name>` in a separate terminal, which requires you to reach the host directly. Running the MCP on a remote bastion while you sit elsewhere is out of scope for v1. If you need bastion-style operation, configure `NOPASSWD` sudoers for the commands the LLM uses so the handoff is rarely needed (see [docs/sudo-handoff.md](./docs/sudo-handoff.md)).
 
 ## Documentation
 
@@ -100,7 +100,7 @@ uv run tai-mcp-ssh audit tail -n 20 --pretty
 - [The sudo handoff](./docs/sudo-handoff.md) — the `tmux attach` flow for interactive prompts, plus `NOPASSWD` sudoers for routine ops.
 - [File transfer](./docs/file-transfer.md) — staging root-owned files via `put` + `sudo mv`, and the downloads-dir confinement `get` enforces.
 - [Observability](./docs/observability.md) — the JSONL audit log and attaching to a live `tmux` pane to watch the LLM work.
-- [Development](./docs/development.md) — tests, linting, pre-commit, CI, and the OpenSpec workflow.
+- [Development](./docs/development.md) — tests, linting, pre-commit and pre-push hooks, and the OpenSpec workflow.
 
 The behavioural contract lives under `openspec/specs/` (one capability per directory). In-flight changes — proposed but not yet promoted into the canonical specs — live under `openspec/changes/`.
 

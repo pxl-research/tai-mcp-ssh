@@ -2,8 +2,10 @@
 
 Opens one ``asyncssh.SSHClientConnection`` per allowlisted host and caches
 it for reuse. On the first ``get(alias)`` for a host the pool verifies
-that ``tmux`` is installed on the remote, ensures ``~/.tai-ssh/logs/``
-exists, and kicks off a best-effort sweep of stale remote log files.
+that ``tmux`` is installed on the remote and ensures ``~/.tai-ssh/logs/``
+exists. While the host is in use the pool also runs best-effort background
+maintenance — a sweep of stale remote log files and a reap of idle
+``tai/*`` tmux sessions — at most once per hour per host.
 
 Password auth resolves the ``keychain://`` reference once at connect
 time; the resolved string is dropped immediately after the handshake.
@@ -13,6 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
+import shlex
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -22,7 +27,7 @@ import keyring
 import keyring.errors
 
 from tai_mcp_ssh.audit import AuditLog
-from tai_mcp_ssh.config import Host
+from tai_mcp_ssh.config import DEFAULT_SESSION_IDLE_TIMEOUT_HOURS, Host
 from tai_mcp_ssh.errors import (
     ConfigError,
     HostNotAllowed,
@@ -33,6 +38,24 @@ from tai_mcp_ssh.errors import (
 
 _KEYCHAIN_PREFIX = "keychain://"
 _REMOTE_LOG_DIR = "~/.tai-ssh/logs"
+
+# Background maintenance (log sweep + idle-session reap) runs at most this
+# often per host. A long-lived MCP connects once, so "on first connect" alone
+# would effectively never re-run.
+_MAINTENANCE_INTERVAL_S = 3600.0
+
+# Session reaping. Only our own sessions are candidates: `tai/*`, plus the
+# legacy `tai-mcp/*` prefix left behind by versions before the rename.
+_REAP_NAME_RE = re.compile(r"^(?:tai|tai-mcp)/")
+# A pane running one of these is sitting at a prompt; anything else (rsync,
+# sudo waiting for a password, an editor) means the session is in use.
+_IDLE_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "fish"})
+# Remote clock first, so idle age never depends on local/remote clock skew.
+_LIST_PANES_CMD = (
+    "date +%s; tmux list-panes -a -F "
+    "'#{session_name}\t#{session_attached}\t#{session_activity}"
+    "\t#{pane_current_command}\t#{pane_pid}'"
+)
 
 # Exceptions that indicate the SSH transport is gone (peer reboot, network
 # drop, sshd kill). Caught at the Connection boundary (and by transfer.py
@@ -154,18 +177,25 @@ class ConnectionPool:
         *,
         connect: ConnectFn | None = None,
         ssh_config: Path | None = None,
+        idle_timeout_hours: int = DEFAULT_SESSION_IDLE_TIMEOUT_HOURS,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self._hosts = hosts
         self._audit = audit
+        self._idle_timeout_hours = idle_timeout_hours
+        self._monotonic = monotonic or time.monotonic
         self._connect: ConnectFn = connect or asyncssh.connect
         self._ssh_config = ssh_config or (Path.home() / ".ssh" / "config")
         self._connections: dict[str, Connection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._ready: set[str] = set()
-        # Strong refs to in-flight fire-and-forget sweep tasks so the event
-        # loop doesn't garbage-collect them mid-run (only a weak ref is held
-        # otherwise). Each task removes itself on completion.
-        self._sweep_tasks: set[asyncio.Task[None]] = set()
+        # Monotonic time of the last maintenance run per alias. Survives
+        # eviction on purpose, so a reconnect storm can't re-trigger it.
+        self._last_maintenance: dict[str, float] = {}
+        # Strong refs to in-flight fire-and-forget maintenance tasks so the
+        # event loop doesn't garbage-collect them mid-run (only a weak ref is
+        # held otherwise). Each task removes itself on completion.
+        self._maintenance_tasks: set[asyncio.Task[None]] = set()
 
     async def get(self, alias: str) -> Connection:
         """Return an open, bootstrap-checked :class:`Connection` for ``alias``.
@@ -194,6 +224,7 @@ class ConnectionPool:
                     await self._evict(alias)
                     raise
                 self._ready.add(alias)
+            self._schedule_maintenance(conn)
             return conn
 
     async def close_all(self) -> None:
@@ -205,15 +236,24 @@ class ConnectionPool:
         self._connections.clear()
         self._ready.clear()
 
-    async def update_hosts(self, new_hosts: dict[str, Host], evict: set[str]) -> None:
+    async def update_hosts(
+        self,
+        new_hosts: dict[str, Host],
+        evict: set[str],
+        *,
+        idle_timeout_hours: int | None = None,
+    ) -> None:
         """Swap the in-memory allowlist and close cached connections for ``evict``.
 
         Called from :meth:`Services.reload_hosts_from_disk` when the user edits
         ``hosts.toml`` at runtime. The per-alias lock is acquired before each
         eviction so a concurrent ``get(alias)`` doesn't race with the close
         (matches the contract that ``_evict`` is always called under-lock).
+        ``idle_timeout_hours``, when given, applies from the next maintenance run.
         """
         self._hosts = new_hosts
+        if idle_timeout_hours is not None:
+            self._idle_timeout_hours = idle_timeout_hours
         for alias in evict:
             lock = self._locks.setdefault(alias, asyncio.Lock())
             async with lock:
@@ -297,7 +337,7 @@ class ConnectionPool:
         return password
 
     async def _ensure_ready(self, conn: Connection) -> None:
-        """Run first-connect bootstrap: tmux check, log dir mkdir, sweep schedule."""
+        """Run first-connect bootstrap: tmux check and log dir mkdir."""
         # 1. tmux presence — must succeed; everything else depends on tmux.
         result = await conn.run("command -v tmux", check=False)
         stdout = _as_str(result.stdout).strip()
@@ -322,17 +362,32 @@ class ConnectionPool:
         await conn.run(f"mkdir -p -m 0700 {_REMOTE_LOG_DIR}", check=True)
         await self._audit.record("_logdir_check", host=conn.alias, status="ok")
 
-        # 4. Best-effort remote-log retention sweep, fire-and-forget. Keep a
-        # strong reference until the task finishes so it isn't GC'd mid-run.
-        task = asyncio.create_task(self._sweep_remote_logs(conn, conn.host.log_retention_days))
-        self._sweep_tasks.add(task)
-        task.add_done_callback(self._sweep_tasks.discard)
+    def _schedule_maintenance(self, conn: Connection) -> None:
+        """Fire-and-forget :meth:`_maintain` if the last run is over an hour old.
+
+        Called under the per-alias lock, and the timestamp is taken before the
+        task starts, so concurrent ``get()`` calls never schedule twice.
+        """
+        now = self._monotonic()
+        last = self._last_maintenance.get(conn.alias)
+        if last is not None and now - last < _MAINTENANCE_INTERVAL_S:
+            return
+        self._last_maintenance[conn.alias] = now
+        task = asyncio.create_task(self._maintain(conn))
+        self._maintenance_tasks.add(task)
+        task.add_done_callback(self._maintenance_tasks.discard)
+
+    async def _maintain(self, conn: Connection) -> None:
+        """Best-effort housekeeping; each step audits its own failures and
+        never raises, so one failing step can't skip the other."""
+        await self._sweep_remote_logs(conn, conn.host.log_retention_days)
+        await self._reap_idle_sessions(conn, self._idle_timeout_hours)
 
     async def _sweep_remote_logs(self, conn: Connection, retention_days: int) -> None:
         """Delete remote ``~/.tai-ssh/logs/*.log`` files older than ``retention_days``.
 
-        Best-effort: failures audit and return; never raised. Runs as a
-        background task scheduled from :meth:`_ensure_ready`.
+        Best-effort: failures audit and return; never raised. Runs from
+        :meth:`_maintain`.
         """
         try:
             cmd = (
@@ -357,3 +412,103 @@ class ConnectionPool:
                 status="error",
                 error=str(exc),
             )
+
+    async def _reap_idle_sessions(self, conn: Connection, idle_timeout_hours: int) -> None:
+        """Kill idle ``tai/*`` (and legacy ``tai-mcp/*``) tmux sessions.
+
+        A session is a candidate only when it is unattached, every pane sits
+        at a plain shell prompt, and its last activity is older than the
+        timeout (see :func:`select_idle_sessions`). Each candidate is killed
+        only if ``pgrep`` positively reports no child processes under its
+        pane shells, so background jobs (``cmd &``) are never SIGHUP'd.
+        Best-effort: failures audit and return; never raised.
+        """
+        if idle_timeout_hours <= 0:
+            return
+        try:
+            result = await conn.run(_LIST_PANES_CMD, check=False)
+            stdout = _as_str(result.stdout)
+            if result.exit_status != 0:
+                stderr = _as_str(result.stderr)
+                if "no server running" not in stderr and "error connecting" not in stderr:
+                    raise RuntimeError(f"tmux list-panes failed: {stderr.strip()}")
+                stdout = ""  # no tmux server -> no sessions to reap
+            candidates = select_idle_sessions(stdout, idle_timeout_hours)
+            killed: list[str] = []
+            if candidates:
+                kill = await conn.run(_kill_command(candidates), check=False)
+                names = {name for name, _ in candidates}
+                killed = [n for n in _as_str(kill.stdout).splitlines() if n in names]
+            await self._audit.record(
+                "_session_sweep",
+                host=conn.alias,
+                idle_timeout_hours=idle_timeout_hours,
+                killed=killed,
+                status="ok",
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort, never raise
+            await self._audit.record(
+                "_session_sweep",
+                host=conn.alias,
+                idle_timeout_hours=idle_timeout_hours,
+                killed=[],
+                status="error",
+                error=str(exc),
+            )
+
+
+def select_idle_sessions(listing: str, idle_timeout_hours: int) -> list[tuple[str, list[int]]]:
+    """Pick reapable sessions from ``_LIST_PANES_CMD`` output.
+
+    ``listing`` is the remote ``date +%s`` line followed by one tab-separated
+    row per pane: name, attached count, session_activity (epoch), current
+    command, pane pid. Returns ``(session_name, pane_pids)`` for every session
+    whose name is ours, is unattached, has been idle longer than the timeout,
+    and whose panes are *all* at a shell prompt. Malformed rows are ignored.
+    """
+    lines = listing.splitlines()
+    if not lines:
+        return []
+    try:
+        now = int(lines[0].strip())
+    except ValueError:
+        return []
+    cutoff = now - idle_timeout_hours * 3600
+
+    sessions: dict[str, tuple[bool, list[int]]] = {}
+    for line in lines[1:]:
+        parts = line.split("\t")
+        if len(parts) != 5:
+            continue
+        name, attached, activity, command, pid = parts
+        if not _REAP_NAME_RE.match(name):
+            continue
+        try:
+            attached_n, activity_ts, pane_pid = int(attached), int(activity), int(pid)
+        except ValueError:
+            continue
+        # Login shells report as `-bash`.
+        at_prompt = command.lstrip("-") in _IDLE_SHELLS
+        idle = attached_n == 0 and activity_ts < cutoff and at_prompt
+        ok, pids = sessions.get(name, (True, []))
+        sessions[name] = (ok and idle, [*pids, pane_pid])
+    return [(name, pids) for name, (ok, pids) in sessions.items() if ok]
+
+
+def _kill_command(candidates: list[tuple[str, list[int]]]) -> str:
+    """One shell line that kills each candidate whose pane shells have no
+    children, echoing the names it killed.
+
+    ``pgrep -P`` exits 1 only when it positively found no children; any other
+    status (children found, pgrep missing or failing) skips the session.
+    """
+    parts = []
+    for name, pids in candidates:
+        no_children = " && ".join(
+            f"{{ pgrep -P {pid} >/dev/null 2>&1; [ $? -eq 1 ]; }}" for pid in pids
+        )
+        parts.append(
+            f"{no_children} && tmux kill-session -t {shlex.quote('=' + name)} "
+            f"&& printf '%s\\n' {shlex.quote(name)}"
+        )
+    return "; ".join(parts)

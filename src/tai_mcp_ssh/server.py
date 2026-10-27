@@ -38,6 +38,18 @@ from tai_mcp_ssh.transfer import TransferManager
 SERVER_NAME = "tai-mcp-ssh"
 SERVER_VERSION = "0.1.0"
 
+# Sent once at MCP initialisation (clients surface it in the system prompt),
+# so session-hygiene guidance lives here rather than in per-turn tool specs.
+SERVER_INSTRUCTIONS = (
+    "Sessions are persistent tmux shells on the remote host and stay open until "
+    "killed (idle ones are only cleaned up after a long timeout). Reuse "
+    "'<host>/default' for routine work. Open a separately named "
+    "session only for a distinct task (parallel or long-running work), and call "
+    "session_kill on it as soon as that task is finished. Do not leave sessions "
+    "behind. If a command is stuck, use session_reset; do not open a new session "
+    "to get around it."
+)
+
 
 def tool_specs() -> list[mtypes.Tool]:
     """Return the 8 tool specs.
@@ -74,7 +86,8 @@ def tool_specs() -> list[mtypes.Tool]:
                 "Returns trimmed output plus log_path so you can read more via "
                 "`cat`/`tail`/`grep`. If status='needs_password' or 'needs_input', "
                 "tell the user to run the attach_hint command, complete the prompt, "
-                "and detach with Ctrl-B D; then call session_wait."
+                "and detach with Ctrl-B D; then call session_wait. Prefer "
+                "'<host>/default'; session_kill extra sessions when their task is done."
             ),
             inputSchema={
                 "type": "object",
@@ -116,7 +129,11 @@ def tool_specs() -> list[mtypes.Tool]:
         ),
         mtypes.Tool(
             name="session_kill",
-            description="Tear down a tmux session on the remote.",
+            description=(
+                "Tear down a tmux session on the remote. Call this when the task "
+                "a session was opened for is done; idle sessions are only cleaned up "
+                "after a long timeout."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {"session_id": {"type": "string"}},
@@ -204,7 +221,11 @@ class Services:
     ) -> None:
         self.config = config or load_config()
         self.audit = audit or AuditLog()
-        self.pool = pool or ConnectionPool(self.config.hosts, self.audit)
+        self.pool = pool or ConnectionPool(
+            self.config.hosts,
+            self.audit,
+            idle_timeout_hours=self.config.sessions.idle_timeout_hours,
+        )
         self.sessions = sessions or SessionManager(self.pool, self.audit)
         self.transfer = transfer or TransferManager(self.pool, self.audit)
 
@@ -226,7 +247,11 @@ class Services:
         removed = old.keys() - new.keys()
         changed = {a for a in old.keys() & new.keys() if old[a] != new[a]}
         self.config = new_cfg
-        await self.pool.update_hosts(new, evict=removed | changed)
+        await self.pool.update_hosts(
+            new,
+            evict=removed | changed,
+            idle_timeout_hours=new_cfg.sessions.idle_timeout_hours,
+        )
         return (len(added), len(removed), len(changed))
 
 
@@ -378,7 +403,7 @@ async def _dispatch_and_audit(services: Services, name: str, args: dict[str, Any
 
 def build_server(services: Services) -> Server:
     """Wire the dispatch logic into a low-level MCP :class:`Server`."""
-    server: Server = Server(SERVER_NAME)
+    server: Server = Server(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
 
     # The mcp SDK's decorators are untyped; ignore the resulting mypy noise
     # on those two lines rather than `# type: ignore`-ing the function bodies.

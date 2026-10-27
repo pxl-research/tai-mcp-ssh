@@ -16,16 +16,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tai_mcp_ssh.audit import AuditLog
-from tai_mcp_ssh.config import AuditSettings, Config, Host
+from tai_mcp_ssh.config import AuditSettings, Config, Host, SessionSettings
 from tai_mcp_ssh.errors import ConfigError, HostNotAllowed, TransferDenied
 from tai_mcp_ssh.server import (
+    SERVER_INSTRUCTIONS,
     Services,
     _dispatch_and_audit,
+    build_server,
     dispatch,
     to_jsonable,
     tool_specs,
 )
 from tai_mcp_ssh.sessions import RunResult
+from tai_mcp_ssh.ssh import ConnectionPool
 
 
 def _audit_records(audit_root: Path, host: str) -> list[dict[str, Any]]:
@@ -54,6 +57,12 @@ def _make_services(
 # ---------------------------------------------------------------------------
 # Tool specs
 # ---------------------------------------------------------------------------
+
+
+def test_server_sends_session_hygiene_instructions(tmp_path: Path) -> None:
+    server = build_server(_make_services(tmp_path))
+    assert server.instructions == SERVER_INSTRUCTIONS
+    assert "session_kill" in SERVER_INSTRUCTIONS
 
 
 def test_tool_specs_returns_eight() -> None:
@@ -138,7 +147,7 @@ async def test_dispatch_hosts_reloads_and_audits_diff_counts(
     assert {h["alias"] for h in result} == {"pi", "vps"}
     # update_hosts was called with the new dict and the eviction set
     # (changed alias only — additions need no eviction).
-    svc.pool.update_hosts.assert_awaited_once_with(after_edit, evict={"pi"})
+    svc.pool.update_hosts.assert_awaited_once_with(after_edit, evict={"pi"}, idle_timeout_hours=48)
     # One _hosts_reload audit record with the diff counts.
     records = _audit_records(tmp_path, "_system")
     reloads = [r for r in records if r["tool"] == "_hosts_reload"]
@@ -195,7 +204,7 @@ async def test_dispatch_hosts_no_op_reload_audits_zero_counts(
     await dispatch(svc, "hosts", {})
 
     # No-op reload: empty evict set, all counts zero, still audited.
-    svc.pool.update_hosts.assert_awaited_once_with(hosts, evict=set())
+    svc.pool.update_hosts.assert_awaited_once_with(hosts, evict=set(), idle_timeout_hours=48)
     records = _audit_records(tmp_path, "_system")
     reloads = [r for r in records if r["tool"] == "_hosts_reload"]
     assert len(reloads) == 1
@@ -229,10 +238,29 @@ async def test_services_reload_hosts_from_disk_returns_diff_counts(
 
     added, removed, changed = await svc.reload_hosts_from_disk()
     assert (added, removed, changed) == (1, 1, 0)
-    svc.pool.update_hosts.assert_awaited_once_with(after, evict={"vps"})
+    svc.pool.update_hosts.assert_awaited_once_with(after, evict={"vps"}, idle_timeout_hours=48)
     # In-memory config now reflects the reloaded one.
     assert svc.config.hosts == after
     svc.audit.close()
+
+
+async def test_idle_timeout_reaches_pool_on_start_and_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hosts = {"pi": Host(alias="pi", host="192.168.1.42")}
+    cfg = Config(hosts=hosts, audit=AuditSettings(), sessions=SessionSettings(24))
+    audit = AuditLog(root=tmp_path)
+    svc = Services(config=cfg, audit=audit, sessions=MagicMock(), transfer=MagicMock())
+    assert svc.pool._idle_timeout_hours == 24
+
+    monkeypatch.setattr(
+        "tai_mcp_ssh.server.load_config",
+        lambda: Config(hosts=hosts, audit=AuditSettings(), sessions=SessionSettings(0)),
+    )
+    await svc.reload_hosts_from_disk()
+    assert isinstance(svc.pool, ConnectionPool)
+    assert svc.pool._idle_timeout_hours == 0
+    audit.close()
 
 
 async def test_dispatch_session_list_delegates(tmp_path: Path) -> None:

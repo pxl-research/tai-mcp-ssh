@@ -1,8 +1,10 @@
 # remote-sessions Specification
 
 ## Purpose
-Give the LLM long-lived shell sessions on managed hosts that survive across multiple tool calls. Each session is a named tmux session on the remote (`tai-mcp/<name>`), identified by a composite `<host>/<name>` ID and addressed via `session_run`, `session_wait`, `session_list`, and `session_kill`. tmux preserves cwd, environment, exported variables, function definitions, and any backgrounded children between calls — the foundation the LLM needs to drive a real interactive workflow. Completion is detected via per-command sentinels; known interactive prompts (sudo, hostkey, apt confirmations) are recognised at the pane tail so the LLM can hand off cleanly when human input is required; transport failures (peer reboot, network drop) are surfaced as a typed `host-unreachable` error and the next call transparently reconnects.
+Give the LLM long-lived shell sessions on managed hosts that survive across multiple tool calls. Each session is a named tmux session on the remote (`tai/<name>`), identified by a composite `<host>/<name>` ID and addressed via `session_run`, `session_wait`, `session_list`, and `session_kill`. tmux preserves cwd, environment, exported variables, function definitions, and any backgrounded children between calls — the foundation the LLM needs to drive a real interactive workflow. Completion is detected via per-command sentinels; known interactive prompts (sudo, hostkey, apt confirmations) are recognised at the pane tail so the LLM can hand off cleanly when human input is required; transport failures (peer reboot, network drop) are surfaced as a typed `host-unreachable` error and the next call transparently reconnects.
+
 ## Requirements
+
 ### Requirement: Composite session identifier
 Sessions SHALL be identified by a composite ID of the form `<host>/<name>`, where `<host>` matches an allowlist alias and `<name>` is a session label chosen by the LLM (default `"default"`). The host SHALL be derivable from the session ID without any additional lookup.
 
@@ -16,12 +18,19 @@ Sessions SHALL be identified by a composite ID of the form `<host>/<name>`, wher
 - **THEN** the tool call SHALL fail with a descriptive error
 
 ### Requirement: tmux-backed sessions auto-create on first use
-On the remote host, each session SHALL correspond to a tmux session named `tai-mcp/<name>`. If the named tmux session does not exist when `session_run` is invoked, the MCP SHALL create it before sending the command.
+On the remote host, each session SHALL correspond to a tmux session named `tai/<name>`. Before sending each command, `session_run` SHALL ensure the named tmux session exists, creating it if absent, on first use or after it was killed outside `session_kill`.
 
 #### Scenario: First call to a new session
-- **WHEN** the LLM calls `session_run("pi-living/default", "pwd")` and no tmux session `tai-mcp/default` exists on `pi-living`
+- **WHEN** the LLM calls `session_run("pi-living/default", "pwd")` and no tmux session `tai/default` exists on `pi-living`
 - **THEN** the MCP SHALL create the tmux session and then send the command
 - **AND** the audit log entry SHALL reflect the session was newly created
+
+#### Scenario: tmux session vanished between calls
+- **WHEN** `pi-living/default` has completed a previous command
+- **AND** the tmux session `tai/default` has since been killed outside `session_kill` (by an operator or the idle-session reaper)
+- **AND** the LLM calls `session_run("pi-living/default", "pwd")`
+- **THEN** the MCP SHALL recreate the tmux session and run the command
+- **AND** the call SHALL NOT fail because the session was missing
 
 #### Scenario: tmux not installed on the remote
 - **WHEN** the remote host does not have `tmux` available on PATH
@@ -47,7 +56,7 @@ While polling the pane for the completion sentinel, the MCP SHALL also detect kn
 #### Scenario: Sudo password prompt detected
 - **WHEN** the pane tail matches `[sudo] password for <user>:` or `Password:`
 - **THEN** the tool SHALL return `status: "needs_password"`
-- **AND** the response SHALL include `attach_hint` with a command of the form `ssh <host> -t tmux attach -t tai-mcp/<name>`
+- **AND** the response SHALL include `attach_hint` with a command of the form `ssh <host> -t tmux attach -t tai/<name>`
 - **AND** the response SHALL include the matched `prompt` string
 - **AND** the audit log entry SHALL record `needs_password: true`
 
@@ -97,7 +106,7 @@ The MCP SHALL expose `session_list()` returning all known active sessions across
 
 #### Scenario: session_kill terminates tmux session
 - **WHEN** the LLM calls `session_kill("pi-living/build")`
-- **THEN** the MCP SHALL execute the equivalent of `tmux kill-session -t tai-mcp/build` on `pi-living`
+- **THEN** the MCP SHALL execute the equivalent of `tmux kill-session -t tai/build` on `pi-living`
 - **AND** the action SHALL be audited
 - **AND** subsequent `session_run` calls to that session_id SHALL auto-create a fresh tmux session
 
@@ -121,3 +130,118 @@ When the SSH transport to a managed host dies (peer reboot, network drop, sshd k
 - **THEN** the local session bookkeeping SHALL be cleared regardless
 - **AND** the response SHALL indicate the remote tmux session was not confirmed killed (`killed: false`)
 - **AND** the call SHALL be audited
+
+### Requirement: Idle session reaping
+The MCP SHALL kill remote tmux sessions named `tai/*` or legacy `tai-mcp/*` that have had no activity for longer than `idle_timeout_hours`, whose pane is at a plain shell prompt (`bash`, `zsh`, `sh`, `dash`, or `fish`), and to which no client is attached. Reaping SHALL be best-effort, SHALL NOT block or fail the triggering tool call, and SHALL NOT touch tmux sessions with any other name.
+
+#### Scenario: Stale idle session is reaped
+- **WHEN** `tai/build` on `pi-living` has been idle for 50 hours at a `bash` prompt with no attached client
+- **AND** reaping runs for `pi-living` with `idle_timeout_hours = 48`
+- **THEN** the tmux session `tai/build` SHALL be killed
+
+#### Scenario: Legacy-prefixed session is reaped
+- **WHEN** `tai-mcp/default` has been idle for longer than the timeout at a shell prompt with no attached client
+- **THEN** it SHALL be killed
+
+#### Scenario: Quiet long-running job is kept
+- **WHEN** `tai/sync` has been idle for longer than the timeout but its pane is running `rsync`
+- **THEN** it SHALL NOT be killed
+
+#### Scenario: Pending sudo handoff is kept
+- **WHEN** `tai/default` has been idle for longer than the timeout and its pane is running `sudo` at a password prompt
+- **THEN** it SHALL NOT be killed
+
+#### Scenario: Attached session is kept
+- **WHEN** a session meets the idle and prompt conditions but a client is attached to it
+- **THEN** it SHALL NOT be killed
+
+#### Scenario: Unrelated tmux sessions are never touched
+- **WHEN** the remote user has an idle tmux session named `work`
+- **THEN** reaping SHALL NOT kill it
+
+#### Scenario: Reaping failure does not affect the tool call
+- **WHEN** reaping fails on a host (for example, the tmux server is not running or the command errors)
+- **THEN** the failure SHALL be audited
+- **AND** the tool call that triggered reaping SHALL proceed normally
+
+### Requirement: Idle timeout setting
+The idle timeout SHALL be configured globally by `[sessions].idle_timeout_hours` in `hosts.toml`, with a default of 48 hours. A value of `0` SHALL disable reaping. There SHALL be no per-host override.
+
+#### Scenario: Default timeout
+- **WHEN** `hosts.toml` has no `[sessions]` table
+- **THEN** reaping SHALL use an idle timeout of 48 hours
+
+#### Scenario: Reaping disabled
+- **WHEN** `hosts.toml` contains `[sessions]` with `idle_timeout_hours = 0`
+- **THEN** no session SHALL be reaped
+
+#### Scenario: Setting changed while the MCP runs
+- **WHEN** the operator changes `idle_timeout_hours` in `hosts.toml` and the `hosts` tool reloads the file
+- **THEN** subsequent reaping runs SHALL use the new value
+
+### Requirement: Periodic per-host maintenance trigger
+Reaping SHALL run in the background when a tool call obtains a connection to a host, at most once per hour per host, including on the first connection after MCP start.
+
+#### Scenario: Throttled re-run on a long-lived server
+- **WHEN** the MCP has been running for a day and the LLM calls `session_run` against `pi-living` every few minutes
+- **THEN** reaping SHALL have run against `pi-living` about once per hour, not on every call and not only once at first connect
+
+#### Scenario: Reaping is audited
+- **WHEN** reaping runs against a host
+- **THEN** a `_session_sweep` audit record SHALL be written for that host with the names of the killed sessions (possibly empty) and the timeout used
+
+### Requirement: `session_reset` recovers a stuck session without killing the pane
+The MCP SHALL expose a `session_reset(session_id)` tool that returns a session with an
+in-flight command to idle by clearing local session bookkeeping, **without** tearing
+down the remote tmux pane. This provides a lighter-weight recovery than `session_kill`
+for the case where a command sent successfully but its completion sentinel will never
+arrive (for example `exec sh` mid-session, or a corrupted/truncated log).
+
+#### Scenario: Reset a busy session returns it to idle
+- **WHEN** a session has an in-flight command (it would return `busy` to `session_run`)
+- **AND** the LLM calls `session_reset(session_id)`
+- **THEN** the tool SHALL clear the in-flight command state and return `reset: true`
+- **AND** the remote tmux pane SHALL NOT be killed
+- **AND** a subsequent `session_run` against the same `session_id` SHALL be accepted
+  (no longer `busy`) and reuse the existing pane
+- **AND** the reset SHALL be audited
+
+#### Scenario: Reset an idle or unknown session is a no-op
+- **WHEN** `session_reset` is called on a session with no in-flight command, or on a
+  `session_id` the MCP has no local state for
+- **THEN** the tool SHALL return `reset: false`
+- **AND** no tmux session SHALL be killed
+
+#### Scenario: Reset does not require a reachable host
+- **WHEN** `session_reset` is called while the host is unreachable
+- **THEN** the local in-flight command state SHALL still be cleared and `reset: true`
+  returned (when there was an in-flight command)
+- **AND** the call SHALL NOT fail with a `host-unreachable` error
+
+### Requirement: `session_reset` preserves the tmux pane
+The tmux pane — its cwd, environment, and any backgrounded children — SHALL survive a
+`session_reset`, so a subsequent `session_run` reuses the same live pane.
+
+#### Scenario: Shell state survives a reset
+- **WHEN** `session_run("pi-living/default", "cd /srv/app")` completed earlier
+- **AND** a later command in that session is stuck and the LLM calls `session_reset("pi-living/default")`
+- **THEN** a following `session_run("pi-living/default", "pwd")` SHALL print `/srv/app`
+- **AND** no tmux session SHALL have been created or killed by the reset
+
+### Requirement: `session_reset` works without a live connection
+`session_reset` SHALL NOT require a live SSH connection to the host, since it mutates
+only local state.
+
+#### Scenario: Reset opens no connection
+- **WHEN** a session has an in-flight command and `session_reset` is called for it
+- **THEN** the reset SHALL complete without opening or using an SSH connection to the host
+
+### Requirement: `session_reset` is audited
+A `session_reset` that clears an in-flight command SHALL be audited as a
+`session_reset` event recording the host, the `session_id`, and the `log_id` of the
+abandoned command.
+
+#### Scenario: Audit record for a reset
+- **WHEN** `session_reset("pi-living/default")` clears an in-flight command with `log_id` `01JV3N…`
+- **THEN** an audit record with `"tool":"session_reset"`, `"host":"pi-living"`,
+  `"session":"pi-living/default"` and `"log_id":"01JV3N…"` SHALL be written

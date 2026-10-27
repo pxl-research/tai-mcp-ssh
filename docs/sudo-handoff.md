@@ -5,7 +5,7 @@ When the LLM runs a command that needs a password, the MCP detects the prompt wi
 ```json
 {
   "status": "needs_password",
-  "attach_hint": "ssh pi-living -t tmux attach -t tai-mcp/default",
+  "attach_hint": "ssh pi-living -t tmux attach -t tai/default",
   "prompt": "[sudo] password for pi:"
 }
 ```

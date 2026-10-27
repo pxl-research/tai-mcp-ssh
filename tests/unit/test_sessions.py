@@ -58,6 +58,9 @@ class FakeConnection:
         self.log_files: dict[str, str] = {}
         # extra handlers per command pattern (for prompt simulation, etc.)
         self.handlers: list[tuple[re.Pattern[str], Callable[[str], FakeProc]]] = []
+        # tmux sessions that exist on the fake remote; the ensure-session step
+        # creates missing ones and echoes the created marker, like real tmux.
+        self.tmux_sessions: set[str] = set()
 
     @property
     def alias(self) -> str:
@@ -84,6 +87,13 @@ class FakeConnection:
         for pattern, handler in self.handlers:
             if pattern.search(command):
                 return handler(command)
+
+        m = re.search(r"tmux new-session -d -s (\S+)", command)
+        if m and "tmux has-session" in command:
+            if m.group(1) not in self.tmux_sessions:
+                self.tmux_sessions.add(m.group(1))
+                return FakeProc(0, "__TAI_CREATED__\n", "")
+            return FakeProc(0, "", "")
 
         if command.startswith("cat "):
             # Extract quoted path; fall back to unquoted.
@@ -158,6 +168,13 @@ def test_parse_session_id_rejects_unsafe_name() -> None:
         parse_session_id("pi/$(whoami)")
     with pytest.raises(ValueError, match="shell metacharacters"):
         parse_session_id("pi/with space")
+
+
+def test_parse_session_id_rejects_dot_in_name() -> None:
+    # tmux rewrites `.` to `_` in session names and parses it as the
+    # window.pane separator in targets, so the session would be unreachable.
+    with pytest.raises(ValueError, match="no dots"):
+        parse_session_id("pi/foo.bar")
 
 
 def test_extract_output_strips_markers_and_prompt() -> None:
@@ -306,10 +323,17 @@ async def test_run_creates_tmux_session_idempotently(tmp_path: Path) -> None:
     sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
 
     await sm.run("pi/default", "ls")
-    # has-session check is part of the create command.
+    # The ensure-session step shares one round trip with pipe-pane: no
+    # separate create call, exact-match targets, literal name for new-session.
     create_calls = [c for c in fc.run_calls if "tmux has-session" in c]
     assert len(create_calls) == 1
-    assert "tmux new-session -d -s tai-mcp/default" in create_calls[0]
+    assert "tmux has-session -t =tai/default " in create_calls[0]
+    assert "tmux new-session -d -s tai/default " in create_calls[0]
+    assert "tmux pipe-pane -t =tai/default:" in create_calls[0]
+    tmux_calls = [c for c in fc.run_calls if c.startswith("tmux ")]
+    assert len(tmux_calls) == 3  # ensure+pipe-pane, send-keys -l, send-keys Enter
+    creates = [r for r in _audit_records(tmp_path, "pi") if r["tool"] == "_session_create"]
+    assert len(creates) == 1
     audit.close()
 
 
@@ -406,8 +430,39 @@ async def test_run_does_not_recreate_session(tmp_path: Path) -> None:
 
     await sm.run("pi/default", "true")
     await sm.run("pi/default", "true")
-    create_calls = [c for c in fc.run_calls if "tmux has-session" in c]
-    assert len(create_calls) == 1
+    # The session is ensured before every command but only created once.
+    assert len([c for c in fc.run_calls if "tmux has-session" in c]) == 2
+    creates = [r for r in _audit_records(tmp_path, "pi") if r["tool"] == "_session_create"]
+    assert len(creates) == 1
+    audit.close()
+
+
+async def test_run_recreates_vanished_tmux_session(tmp_path: Path) -> None:
+    # A tracked session whose tmux session was killed outside session_kill
+    # (by hand or by the idle reaper) must be recreated, not stay broken.
+    fc = FakeConnection("pi")
+    fc.add_handler(
+        r"^tail -c ",
+        lambda cmd: FakeProc(
+            0,
+            _make_log(
+                re.search(r"/logs/([0-9A-Z]+)\.log", cmd).group(1),  # type: ignore[union-attr]
+                output="ok",
+            ),
+            "",
+        ),
+    )
+    audit = AuditLog(root=tmp_path)
+    sm = SessionManager(FakePool({"pi": fc}), audit, poll_interval=0.01)  # type: ignore[arg-type]
+
+    await sm.run("pi/default", "true")
+    fc.tmux_sessions.discard("tai/default")
+
+    result = await sm.run("pi/default", "pwd")
+    assert result.status == "done"
+    assert "tai/default" in fc.tmux_sessions
+    creates = [r for r in _audit_records(tmp_path, "pi") if r["tool"] == "_session_create"]
+    assert len(creates) == 2
     audit.close()
 
 
@@ -450,7 +505,7 @@ async def test_run_returns_needs_password_on_sudo_prompt(tmp_path: Path) -> None
     assert result.status == "needs_password"
     assert result.prompt is not None and result.prompt.startswith("[sudo]")
     assert result.attach_hint is not None
-    assert "tmux attach -t tai-mcp/default" in result.attach_hint
+    assert "tmux attach -t tai/default" in result.attach_hint
     audit.close()
 
 
@@ -597,7 +652,7 @@ async def test_kill_terminates_session_and_clears_state(tmp_path: Path) -> None:
     await sm.run("pi/default", "ok")
     result = await sm.kill("pi/default")
     assert result["killed"] is True
-    assert any("tmux kill-session -t tai-mcp/default" in c for c in fc.run_calls)
+    assert any("tmux kill-session -t =tai/default" in c for c in fc.run_calls)
     assert sm.list_sessions() == []
 
     records = _audit_records(tmp_path, "pi")
@@ -832,7 +887,8 @@ async def test_reset_busy_session_returns_to_idle_and_reuses_pane(tmp_path: Path
     # create across both runs, and the pane is never killed.
     second = await sm.run("pi/default", "again", timeout=0.1)
     assert second.status != "busy"
-    assert len([c for c in fc.run_calls if "tmux has-session" in c]) == 1
+    creates = [r for r in _audit_records(tmp_path, "pi") if r["tool"] == "_session_create"]
+    assert len(creates) == 1
     assert not any("tmux kill-session" in c for c in fc.run_calls)
     audit.close()
 

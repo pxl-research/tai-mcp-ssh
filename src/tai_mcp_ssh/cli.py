@@ -202,7 +202,11 @@ def _run_hosts_test(alias: str) -> None:
     if alias not in cfg.hosts:
         raise click.ClickException(f"no host with alias {alias!r}")
     audit = AuditLog()
-    pool = ConnectionPool({alias: cfg.hosts[alias]}, audit)
+    pool = ConnectionPool(
+        {alias: cfg.hosts[alias]},
+        audit,
+        idle_timeout_hours=cfg.sessions.idle_timeout_hours,
+    )
     start = time.monotonic()
     try:
         asyncio.run(_probe(pool, alias))
