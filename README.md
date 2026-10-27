@@ -9,6 +9,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io) server that lets an 
 - Captures all output to a log file on the remote (`~/.tai-ssh/logs/<log_id>.log`). Tool responses return head + tail slices; the LLM uses plain `tail`/`grep`/`cat` against the log path to read more.
 - Detects sudo prompts and other interactive prompts the LLM cannot answer. Hands off to you via `tmux attach`, then resumes once you detach.
 - `session_reset` recovers a wedged command without killing the pane; `session_kill` tears the pane down.
+- Tells the LLM to close the sessions it opens, and cleans up `tai/*` sessions left idle at a prompt for 48 hours (configurable).
 - Keeps a JSONL audit log of every tool call: command, exit code, byte count, and (optional) LLM-supplied reason.
 
 ## What it does NOT do

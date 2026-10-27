@@ -15,7 +15,7 @@ uv run pytest tests/unit/test_sessions.py --no-cov   # a subset (skips the cover
 uv run ruff check .
 uv run ruff format .
 uv run mypy src                                      # strict mode
-uv run pre-commit run --all-files                    # all hooks, e.g. before opening a PR
+uv run pre-commit run --all-files                    # commit hooks, e.g. before opening a PR
 ```
 
 The tests are unit-only and never open real SSH connections. Each test module defines its own fake connection, pool, and SFTP client, and passes them to the managers through their constructors.
@@ -43,3 +43,5 @@ Behaviour is specified per capability in `openspec/specs/<capability>/spec.md`. 
 1. Propose it under `openspec/changes/<name>/` with a proposal, a design, spec deltas, and tasks.
 2. Implement the tasks.
 3. Archive the change, which promotes its deltas into the canonical specs.
+
+Check the specs with `openspec validate --specs --strict`. All of them pass, so treat any warning as something to fix. The `openspec` CLI is installed separately (npm package `@fission-ai/openspec`) and is not part of the hooks.
