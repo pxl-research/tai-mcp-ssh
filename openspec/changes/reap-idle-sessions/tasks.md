@@ -35,7 +35,7 @@
 
 - [x] 5.1 Run `uv run pytest` and `uv run pre-commit run --all-files`. Verify that both pass and coverage stays at or above 85%.
 - [x] 5.2 Run `openspec validate reap-idle-sessions --strict` and verify that it reports the change as valid.
-- [ ] 5.3 Smoke test on a real host, using the oldest tmux in use. Verify that:
+- [x] 5.3 Smoke test on a real host, using the oldest tmux in use. Verify that:
   - `=`-targets work for `has-session`, `kill-session`, `pipe-pane` and `send-keys`
   - a session killed by hand is recreated on the next `session_run`
   - with `idle_timeout_hours` temporarily set to 1 and the session backdated by waiting, an idle session is reaped and the audit shows `_session_sweep`

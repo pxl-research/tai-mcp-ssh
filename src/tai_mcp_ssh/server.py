@@ -42,7 +42,8 @@ SERVER_VERSION = "0.1.0"
 # so session-hygiene guidance lives here rather than in per-turn tool specs.
 SERVER_INSTRUCTIONS = (
     "Sessions are persistent tmux shells on the remote host and stay open until "
-    "killed. Reuse '<host>/default' for routine work. Open a separately named "
+    "killed (idle ones are only cleaned up after a long timeout). Reuse "
+    "'<host>/default' for routine work. Open a separately named "
     "session only for a distinct task (parallel or long-running work), and call "
     "session_kill on it as soon as that task is finished. Do not leave sessions "
     "behind. If a command is stuck, use session_reset; do not open a new session "
@@ -130,7 +131,8 @@ def tool_specs() -> list[mtypes.Tool]:
             name="session_kill",
             description=(
                 "Tear down a tmux session on the remote. Call this when the task "
-                "a session was opened for is done; sessions are not closed automatically."
+                "a session was opened for is done; idle sessions are only cleaned up "
+                "after a long timeout."
             ),
             inputSchema={
                 "type": "object",
