@@ -1,4 +1,4 @@
-"""MCP stdio server exposing the 7-tool surface.
+"""MCP stdio server exposing the 8-tool surface.
 
 The MCP integration is intentionally thin: tool inputs are dispatched to
 the underlying managers (:class:`SessionManager`, :class:`TransferManager`,
@@ -40,7 +40,7 @@ SERVER_VERSION = "0.1.0"
 
 
 def tool_specs() -> list[mtypes.Tool]:
-    """Return the 7 tool specs.
+    """Return the 8 tool specs.
 
     Descriptions are deliberately concise — they're sent on every LLM turn,
     so verbosity here is paid for repeatedly.
