@@ -1,7 +1,7 @@
 # audit-log Specification
 
 ## Purpose
-Provide a durable, per-host, per-day JSONL record of every MCP tool invocation — including rejections and errors — so operators can later answer "what did the LLM do, on which host, with what outcome?" without re-running anything. The log is the system's forensic primitive: every call writes exactly one record, secrets never appear in any field, and the on-disk layout is greppable with standard tools.
+Provide a durable, per-host, per-day JSONL record of every action the LLM takes on a managed host — including rejections and errors — so operators can later answer "what did the LLM do, on which host, with what outcome?" without re-running anything. The log is the system's forensic primitive: every host action writes exactly one record, secrets never appear in any field, and the on-disk layout is greppable with standard tools.
 
 ## Requirements
 
@@ -48,8 +48,8 @@ The MCP SHALL delete audit files older than the configured retention period from
 - **THEN** the failure SHALL be recorded as a `_system` event with the error message
 - **AND** the MCP SHALL continue serving
 
-### Requirement: Every tool invocation produces exactly one audit record
-The MCP SHALL write one audit record per tool invocation, including invocations that fail before any remote action.
+### Requirement: Every host action produces exactly one audit record
+The MCP SHALL write exactly one audit record for every tool invocation that acts on a managed host: running or polling a command, killing a session, resetting an in-flight command, or transferring a file. Every invocation that is rejected or fails SHALL also produce exactly one record, including failures before any remote action. Invocations that only read local state or leave it unchanged need not produce a record.
 
 #### Scenario: Rejected call audited
 - **WHEN** a tool call is rejected because the host alias is not in the allowlist
@@ -61,6 +61,11 @@ The MCP SHALL write one audit record per tool invocation, including invocations 
 - **THEN** the initial `session_run` SHALL produce one record (with `status: "still_running"`)
 - **AND** each `session_wait` SHALL produce its own record
 - **AND** all records related to the same underlying command SHALL share the same `log_id`
+
+#### Scenario: Local-only calls need no record
+- **WHEN** the LLM calls `session_list()`, or calls `session_wait` or `session_reset` on a session that has no command in flight
+- **THEN** the call MAY complete without writing an audit record
+- **AND** if the call is rejected or fails, it SHALL still produce one record
 
 ### Requirement: Audit record schema
 Each audit record SHALL include the fields: `ts` (ISO-8601 UTC), `tool`, `host` (always present; `"_system"` for non-host events), `session` (when applicable), `user` (when applicable), `cmd` (when applicable), `reason` (when supplied by the LLM), `exit` (when applicable), `status`, `duration_ms`, `stdout_bytes`, `stderr_bytes`, `log_id` (when applicable), `truncated`, `needs_password` (boolean, when applicable), and `sha256` (for `put`/`get`).
