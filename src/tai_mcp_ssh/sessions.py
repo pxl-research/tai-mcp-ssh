@@ -26,6 +26,10 @@ from tai_mcp_ssh.ssh import Connection, ConnectionPool
 
 _TMUX_PREFIX = "tai"
 
+# Echoed by the ensure-session step in _send_command when it had to create
+# the tmux session, so the manager can audit `_session_create`.
+_CREATED_MARKER = "__TAI_CREATED__"
+
 # Session names are interpolated into remote shell commands; restrict to a
 # safe character set so a session_id like `pi/foo;touch /tmp/pwned` can't
 # inject. Hosts are already constrained by the allowlist at the call site.
@@ -169,7 +173,7 @@ class SessionManager:
                     return self._busy_result(state)
 
                 if state is None:
-                    state = await self._create_session(conn, session_id, host, name)
+                    state = self._new_state(session_id, host, name)
                     self._sessions[session_id] = state
 
                 log_id = str(ULID())
@@ -182,7 +186,7 @@ class SessionManager:
                 state.last_used_at = state.started_at
 
                 try:
-                    await self._send_command(conn, name, log_id, log_path, command)
+                    created = await self._send_command(conn, name, log_path, log_id, command)
                 except Exception:
                     # A failed send (e.g. tmux command returns non-zero because
                     # the pane was killed externally) must not leave the session
@@ -190,6 +194,8 @@ class SessionManager:
                     # it. HostUnreachable still propagates to _forget below.
                     self._clear_state(state)
                     raise
+                if created:
+                    await self._audit.record("_session_create", host=host, session=session_id)
 
             return await self._poll(conn, state, timeout, tool="session_run")
         except HostUnreachable:
@@ -222,7 +228,7 @@ class SessionManager:
         killed = False
         try:
             conn = await self._pool.get(host)
-            result = await conn.run(f"tmux kill-session -t {_TMUX_PREFIX}/{name}", check=False)
+            result = await conn.run(f"tmux kill-session -t {_session_target(name)}", check=False)
             killed = result.exit_status == 0
         except HostUnreachable:
             # Remote tmux is already dead by definition; nothing to kill.
@@ -281,20 +287,8 @@ class SessionManager:
 
     # Internals -------------------------------------------------------------
 
-    async def _create_session(
-        self, conn: Connection, session_id: str, host: str, name: str
-    ) -> _SessionState:
-        # Idempotent: succeeds whether the tmux session exists from a prior
-        # MCP run or not. Without `has-session` first, `new-session` would
-        # error on re-attach.
-        tmux_target = f"{_TMUX_PREFIX}/{name}"
-        await conn.run(
-            f"tmux has-session -t {tmux_target} 2>/dev/null "
-            f"|| tmux new-session -d -s {tmux_target}",
-            check=True,
-        )
+    def _new_state(self, session_id: str, host: str, name: str) -> _SessionState:
         now = self._now()
-        await self._audit.record("_session_create", host=host, session=session_id)
         return _SessionState(
             session_id=session_id,
             host=host,
@@ -307,11 +301,16 @@ class SessionManager:
         self,
         conn: Connection,
         name: str,
-        log_id: str,
         log_path: str,
+        log_id: str,
         command: str,
-    ) -> None:
-        tmux_target = f"{_TMUX_PREFIX}/{name}"
+    ) -> bool:
+        """Ensure the tmux session exists, then type ``command`` into it.
+
+        Returns True when the tmux session had to be (re)created.
+        """
+        session_target = _session_target(name)
+        pane_target = _pane_target(name)
 
         # Wrap with START/DONE markers. The shell prompt's echo of the typed
         # text contains the *literal* markers, so we don't confuse them with
@@ -338,22 +337,30 @@ class SessionManager:
             f"printf '\\n__TAI_DONE__%d__{log_id}__\\n' \"$?\""
         )
 
-        # Reset pipe-pane then redirect to the new per-command log file.
-        # Two `pipe-pane` invocations chained by `;` is one ssh round trip.
+        # One ssh round trip: ensure the tmux session exists (first use, or
+        # recreated after it was killed outside session_kill — by hand or by
+        # the idle reaper), then reset pipe-pane and redirect it to the new
+        # per-command log file.
         pipe_cmd = f"cat >> {log_path}"
-        await conn.run(
-            f"tmux pipe-pane -t {tmux_target}; "
-            f"tmux pipe-pane -t {tmux_target} {shlex.quote(pipe_cmd)}",
+        result = await conn.run(
+            f"tmux has-session -t {session_target} 2>/dev/null || "
+            f"{{ tmux new-session -d -s {_TMUX_PREFIX}/{name} && echo {_CREATED_MARKER}; }}; "
+            f"tmux pipe-pane -t {pane_target}; "
+            f"tmux pipe-pane -t {pane_target} {shlex.quote(pipe_cmd)}",
             check=True,
         )
+        stdout = result.stdout
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
 
         # Type the command literally (so semicolons/quotes survive untouched),
         # then a separate `Enter` keystroke to execute.
         await conn.run(
-            f"tmux send-keys -t {tmux_target} -l {shlex.quote(wrapped)}",
+            f"tmux send-keys -t {pane_target} -l {shlex.quote(wrapped)}",
             check=True,
         )
-        await conn.run(f"tmux send-keys -t {tmux_target} Enter", check=True)
+        await conn.run(f"tmux send-keys -t {pane_target} Enter", check=True)
+        return _CREATED_MARKER in (stdout or "")
 
     async def _poll(
         self,
@@ -531,6 +538,18 @@ class SessionManager:
 
 
 # Module-level helpers -----------------------------------------------------
+
+
+def _session_target(name: str) -> str:
+    """tmux target for session commands. The `=` prefix forces an exact name
+    match: without it tmux falls back to prefix matching, so `tai/foo` would
+    resolve to `tai/foobar` once `tai/foo` is gone."""
+    return f"={_TMUX_PREFIX}/{name}"
+
+
+def _pane_target(name: str) -> str:
+    """Exact-match tmux target for pane commands (active pane of the session)."""
+    return f"={_TMUX_PREFIX}/{name}:"
 
 
 def _iso(ts: datetime) -> str:

@@ -219,7 +219,11 @@ class Services:
     ) -> None:
         self.config = config or load_config()
         self.audit = audit or AuditLog()
-        self.pool = pool or ConnectionPool(self.config.hosts, self.audit)
+        self.pool = pool or ConnectionPool(
+            self.config.hosts,
+            self.audit,
+            idle_timeout_hours=self.config.sessions.idle_timeout_hours,
+        )
         self.sessions = sessions or SessionManager(self.pool, self.audit)
         self.transfer = transfer or TransferManager(self.pool, self.audit)
 
@@ -241,7 +245,11 @@ class Services:
         removed = old.keys() - new.keys()
         changed = {a for a in old.keys() & new.keys() if old[a] != new[a]}
         self.config = new_cfg
-        await self.pool.update_hosts(new, evict=removed | changed)
+        await self.pool.update_hosts(
+            new,
+            evict=removed | changed,
+            idle_timeout_hours=new_cfg.sessions.idle_timeout_hours,
+        )
         return (len(added), len(removed), len(changed))
 
 

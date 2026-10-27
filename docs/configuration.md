@@ -42,6 +42,9 @@ password_ref = "keychain://tai-mcp-ssh/lab-box"
 
 [audit]
 retention_days = 90
+
+[sessions]
+idle_timeout_hours = 48
 ```
 
 ### Host fields
@@ -54,9 +57,20 @@ retention_days = 90
 | `auth` | `"key"` | Either `"key"` or `"password"`. |
 | `identity_file` | — | A specific private key. Applies to key auth only. |
 | `password_ref` | — | Required when `auth = "password"`. Must have the form `keychain://<service>/<account>`. |
-| `log_retention_days` | `7` | Remote command logs older than this are deleted the first time the server connects to the host. |
+| `log_retention_days` | `7` | Remote command logs older than this are deleted in the background while the MCP is in use, at most once per hour per host. |
 
 The `[audit] retention_days` setting (default `90`) controls how long local audit files are kept. See [observability.md](./observability.md).
+
+### Session cleanup
+
+`[sessions] idle_timeout_hours` (default `48`, `0` disables it) is a global setting; there is no per-host override. Remote tmux sessions named `tai/*` are cleaned up automatically. Sessions with the old `tai-mcp/*` prefix are also included. A session is killed only when all of these hold:
+
+- Its last activity is older than `idle_timeout_hours`.
+- Its pane is sitting at a plain shell prompt (`bash`, `zsh`, `sh`, `dash`, or `fish`). A running job, or a `sudo` prompt waiting for a handoff, keeps the session alive.
+- No one is attached to it.
+- Its shell has no background child processes, such as a job started with `cmd &`.
+
+The cleanup never touches tmux sessions with other names. It runs in the background while the MCP is in use, at most once per hour per host. Every run is recorded in the audit log as `_session_sweep`. If the LLM later reuses a session that was cleaned up, the server recreates it on the next `session_run`, so the call still succeeds. The session's previous shell state (working directory, environment) is lost.
 
 ### Secrets are rejected
 
@@ -67,6 +81,7 @@ The server refuses to load the file if any key named `password`, `passwd`, `secr
 - The host alias is passed to asyncssh as the connection target, so the matching `~/.ssh/config` block (HostName, User, Port, IdentityFile, ProxyJump, …) applies. Any value set in `hosts.toml` overrides the corresponding `~/.ssh/config` value.
 - Each host gets one cached connection per server process. A connection that dies (for example after a reboot or network drop) is detected through 30-second keepalives and reopened automatically on the next tool call.
 - The first time the server connects to a host, it checks that `tmux` is installed and creates `~/.tai-ssh/logs/` with mode `0700`.
+- While a host is in use, the server runs background maintenance at most once per hour per host: it deletes old remote logs and cleans up idle sessions (see [Session cleanup](#session-cleanup)).
 
 ## Local paths
 

@@ -19,6 +19,8 @@ A `session_id` has the form `<host>/<name>`, for example `pi-living/default`. Th
 
 Sessions stay open until they are killed. **The model using the server is responsible for closing sessions:** reuse `<host>/default` for routine work, and call `session_kill` on any other session once its task is finished. The server sends this guidance to the client as MCP server `instructions` when the client connects, and repeats it briefly in the `session_run` and `session_kill` descriptions.
 
+As a backstop, the server cleans up sessions on its own. It kills a `tai/*` session that has been idle for 48 hours (configurable), as long as it is sitting at a shell prompt, has no attached client, and has no background jobs. A running command, a pending sudo prompt, or an attached human keeps a session alive. If a session was cleaned up (or killed by hand), the next `session_run` on it recreates it transparently, but its previous shell state is gone. See [configuration.md](./configuration.md#session-cleanup).
+
 ## Run result
 
 ```json
